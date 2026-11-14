@@ -31,7 +31,7 @@ Function Notify(string asText)
 EndFunction
 
 Event OnRead()
-	if OSB_Native.Version() < 2
+	if OSB_Native.Version() < 3
 		Debug.MessageBox("Outpost Backup: the SFSE plugin is missing or out of date.\n\nInstall Data\\SFSE\\Plugins\\OutpostBackup.dll and start the game with SFSE (sfse_loader.exe).")
 		return
 	endif
@@ -91,7 +91,7 @@ int Function CountOutpostObjects(ObjectReference akBeacon, Keyword akKeyword)
 	int i = 0
 	while refs && i < refs.Length
 		ObjectReference r = refs[i]
-		if r && r != akBeacon && !OSB.IsSkippedBase(r.GetBaseObject()) && !OnBeacon(r, akBeacon)
+		if r && r != akBeacon && OSB_Native.IsBuildable(r.GetBaseObject()) && !OnBeacon(r, akBeacon)
 			n += 1
 		endif
 		i += 1
@@ -168,11 +168,15 @@ Function DoBackup()
 	endif
 	Actor player = Game.GetPlayer()
 	Location planetLoc = None
+	Location[] planetParents = None
 	Planet p = player.GetCurrentPlanet()
 	if p
 		planetLoc = p.GetLocation()
+		if planetLoc
+			planetParents = planetLoc.GetParentLocations()
+		endif
 	endif
-	if !OSB_Native.BeginBackup(beacon, planetLoc, player.GetCurrentLocation(), beacon.GetPositionX(), beacon.GetPositionY(), beacon.GetPositionZ(), beacon.GetAngleZ())
+	if !OSB_Native.BeginBackup(beacon, planetLoc, planetParents, player.GetCurrentLocation(), beacon.GetPositionX(), beacon.GetPositionY(), beacon.GetPositionZ(), beacon.GetAngleZ())
 		Notify("only works on a planet surface.")
 		return
 	endif
@@ -215,7 +219,7 @@ int Function DoLand()
 	if IsOutsideOnPlanet() && spot && spot.Length >= 4 && spot[3] <= kMaxGuideMeters
 		return flow   ; already there: the flow moves you onto the spot
 	endif
-	string planetName = OSB_Native.GetSelectedPlanetName()
+	string planetName = Where()
 	if Game.IsFarTravelControlsEnabled()
 		Debug.Notification("Outpost Backup: open " + planetName + " in the star map and land anywhere on it.")
 		Game.ShowGalaxyStarMapMenu()
@@ -249,12 +253,23 @@ int Function DoRestore()
 	return OSB_Native.NewFlow()
 EndFunction
 
+; "Planet (System)" of the selected outpost.
+string Function Where()
+	string planetName = OSB_Native.GetSelectedPlanetName()
+	string systemName = OSB_Native.GetSelectedSystemName()
+	if systemName != ""
+		return planetName + " in the " + systemName + " system"
+	endif
+	return planetName
+EndFunction
+
 ; Arrive near the saved outpost -> stand on the beacon spot -> wait for a beacon -> restore.
 Function RunFlow(int aiFlow)
 	Actor player = Game.GetPlayer()
 	float[] spot
 
 	; 1. wait until you are outside near the saved outpost (after the landing)
+	Planet warnedOn = None
 	float waited = 0.0
 	while true
 		if OSB_Native.CurrentFlow() != aiFlow
@@ -262,6 +277,13 @@ Function RunFlow(int aiFlow)
 		endif
 		if IsOutsideOnPlanet()
 			spot = OSB_Native.GetGuideSpot()
+			if spot == None || spot.Length < 4
+				Planet here = player.GetCurrentPlanet()
+				if here != warnedOn
+					warnedOn = here
+					Debug.MessageBox("This is not the saved outpost's planet.\n\nThe outpost is on " + Where() + ". Open the star map and land there.")
+				endif
+			endif
 			if spot && spot.Length >= 4 && spot[3] <= kMaxGuideMeters
 				Utility.Wait(1.0)
 				; 2. stand on the saved beacon spot (unless a beacon is already there)

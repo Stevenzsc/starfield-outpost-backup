@@ -40,7 +40,7 @@ namespace OSB
 		// BGSPlanet::Manager (static object), see docs: +0x80 planet, +0x98 lon, +0xA0 lat (radians), +0x100 radius km
 		constexpr REL::ID kPlanetManager{ 945580 };
 
-		constexpr std::int32_t kVersion = 2;
+		constexpr std::int32_t kVersion = 3;
 
 		// OSB_PickMsg layout (see tools\esp): button 0 Cancel, 1 More..., 2..9 entries
 		constexpr std::size_t kPickEntries = 8;
@@ -58,7 +58,7 @@ namespace OSB
 
 		struct Backup
 		{
-			std::string name, planetName;
+			std::string name, planetName, systemName;
 			std::int64_t time{ 0 };
 			std::uint32_t planet{ 0 };
 			double radiusKm{ 0 }, lat{ 0 }, lon{ 0 };
@@ -299,6 +299,7 @@ namespace OSB
 			o << "OSB\t1\n";
 			o << "name\t" << Clean(b.name) << '\n';
 			o << "planetname\t" << Clean(b.planetName) << '\n';
+			o << "systemname\t" << Clean(b.systemName) << '\n';
 			o << "time\t" << b.time << '\n';
 			o << "planet\t" << std::format("{:08X}", b.planet) << '\t' << b.radiusKm << '\n';
 			o << "origin\t" << b.lat << '\t' << b.lon << '\n';
@@ -361,6 +362,8 @@ namespace OSB
 						b.name = t[1];
 					} else if (t[0] == "planetname" && t.size() >= 2) {
 						b.planetName = t[1];
+					} else if (t[0] == "systemname" && t.size() >= 2) {
+						b.systemName = t[1];
 					} else if (t[0] == "time" && t.size() >= 2) {
 						b.time = std::stoll(t[1]);
 					} else if (t[0] == "planet" && t.size() >= 3) {
@@ -442,7 +445,10 @@ namespace OSB
 					when = std::format(", {:04}-{:02}-{:02} {:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
 				}
 			}
-			return std::format("{} - {} ({} objects{})", name, planet, e.count, when);
+			if (!h.systemName.empty()) {
+				planet += " (" + h.systemName + ")";
+			}
+			return std::format("{} - {} - {} objects{}", name, planet, e.count, when);
 		}
 
 		// The selection survives a game restart (a running slate flow is in the save, the plugin state is not).
@@ -513,7 +519,7 @@ namespace OSB
 		}
 
 		// a_planetLoc: the planet's location (planet name); a_hereLoc: the player's current location (outpost name).
-		bool BeginBackup(std::monostate, RE::TESObjectREFR* a_beacon, RE::BGSLocation* a_planetLoc, RE::BGSLocation* a_hereLoc, float a_bx, float a_by, float a_bz, float a_byaw)
+		bool BeginBackup(std::monostate, RE::TESObjectREFR* a_beacon, RE::BGSLocation* a_planetLoc, std::vector<RE::BGSLocation*> a_planetParents, RE::BGSLocation* a_hereLoc, float a_bx, float a_by, float a_bz, float a_byaw)
 		{
 			std::scoped_lock l(g_lock);
 			const auto s = ReadPlanet();
@@ -530,6 +536,13 @@ namespace OSB
 			g_pending.planetName = LocationName(a_planetLoc);
 			if (g_pending.planetName.empty()) {
 				g_pending.planetName = FormName(RE::TESForm::LookupByID(s.planet));
+			}
+			for (auto* loc : a_planetParents) {   // the star system is one of the planet location's parents
+				const auto n = LocationName(loc);
+				REX::INFO("backup: planet parent location {:08X} '{}'", loc ? loc->GetFormID() : 0, n);
+				if (g_pending.systemName.empty() && !n.empty() && n != g_pending.planetName) {
+					g_pending.systemName = n;
+				}
 			}
 			g_pending.name = LocationName(a_hereLoc);
 			if (g_pending.name == g_pending.planetName) {
@@ -748,6 +761,18 @@ namespace OSB
 			return e->head.planetName.empty() ? std::string("the saved outpost's planet") : e->head.planetName;
 		}
 
+		std::string GetSelectedSystemName(std::monostate)
+		{
+			std::scoped_lock l(g_lock);
+			const auto* e = SelectedEntry();
+			return e ? e->head.systemName : std::string();
+		}
+
+		bool IsBuildableBase(std::monostate, RE::TESForm* a_base)
+		{
+			return a_base && IsBuildable(a_base);
+		}
+
 		// Move the selected backup to OutpostBackup\Deleted.
 		bool DeleteBackup(std::monostate)
 		{
@@ -944,6 +969,8 @@ namespace OSB
 		vm->BindNativeMethod(obj, "SelectBackup", SelectBackup, true, false);
 		vm->BindNativeMethod(obj, "GetSelectedName", GetSelectedName, true, false);
 		vm->BindNativeMethod(obj, "GetSelectedPlanetName", GetSelectedPlanetName, true, false);
+		vm->BindNativeMethod(obj, "GetSelectedSystemName", GetSelectedSystemName, true, false);
+		vm->BindNativeMethod(obj, "IsBuildable", IsBuildableBase, true, false);
 		vm->BindNativeMethod(obj, "DeleteBackup", DeleteBackup, true, false);
 		vm->BindNativeMethod(obj, "ArmLanding", ArmLanding, true, false);
 		vm->BindNativeMethod(obj, "GetGuideSpot", GetGuideSpot, true, false);
