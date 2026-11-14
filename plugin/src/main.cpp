@@ -7,6 +7,8 @@
 // After use the file is renamed to OSB_LandTarget.used.txt. Every landing is logged to
 // Documents\My Games\Starfield\SFSE\Logs\OSBLanding.log.
 
+#include "Backup.h"
+
 #include <cmath>
 #include <format>
 #include <filesystem>
@@ -64,10 +66,16 @@ namespace
 				kSites[I].name, a_planet, a_site[1] * toDeg, a_site[0] * toDeg);
 
 			double lat = 0.0, lon = 0.0;
-			if (kSites[I].override && ReadTarget(lat, lon)) {
+			if (kSites[I].override && OSB::TakeArmedLanding(lat, lon)) {
+				// armed from the in-game slate
 				a_site[0] = lon / toDeg;
 				a_site[1] = lat / toDeg;
-				REX::INFO("landing: OVERRIDE -> lat {:.6f} lon {:.6f}", lat, lon);
+				REX::INFO("landing: OVERRIDE (slate) -> lat {:.6f} lon {:.6f}", lat, lon);
+			} else if (kSites[I].override && ReadTarget(lat, lon)) {
+				// armed by tools\arm-landing.ps1
+				a_site[0] = lon / toDeg;
+				a_site[1] = lat / toDeg;
+				REX::INFO("landing: OVERRIDE (file) -> lat {:.6f} lon {:.6f}", lat, lon);
 
 				std::error_code ec;
 				auto used = TargetFile();
@@ -127,6 +135,7 @@ namespace
 	{
 		if (a_msg && a_msg->type == SFSE::MessagingInterface::kPostDataLoad) {
 			DumpLoadOrder();
+			OSB::RegisterNatives();
 		}
 	}
 
