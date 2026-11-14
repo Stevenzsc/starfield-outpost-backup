@@ -66,7 +66,7 @@ namespace OSB::Builder
 			{
 				// the object itself, or for a PackIn its group dummy (OutpostGroupPackinDummy 0x15804)
 				if (auto* ref = a_event.item.get()) {
-					const auto* base = ref->GetBaseObject();
+					const auto base = ref->GetBaseObject();
 					const auto id = base ? base->GetFormID() : 0;
 					if (id && (id == g_jobForm.load() || id == 0x15804)) {
 						const auto p = ref->GetPosition();
