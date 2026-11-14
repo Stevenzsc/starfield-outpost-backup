@@ -1,1 +1,10 @@
 backups/
+tools/memscan/*.exe
+tools/memscan/candidates.txt
+tools/memscan/*.txt
+tools/xref/bin/
+tools/xref/obj/
+tools/xref/out/
+plugin/build/
+plugin/.xmake/
+plugin/vsxmake*/

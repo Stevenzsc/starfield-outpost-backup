@@ -76,7 +76,7 @@ Function Backup(int aiBeaconID) global
 	if refs
 		total = refs.Length
 	endif
-	Debug.TraceUser(log, "OSB-BEGIN beacon=" + beacon + " pos=(" + beacon.GetPositionX() + "," + beacon.GetPositionY() + "," + beacon.GetPositionZ() + ") linked=" + total)
+	Debug.TraceUser(log, "OSB-BEGIN beacon=" + beacon + " pos=(" + beacon.GetPositionX() + "," + beacon.GetPositionY() + "," + beacon.GetPositionZ() + ") yaw=" + beacon.GetAngleZ() + " linked=" + total)
 	float bx = beacon.GetPositionX()
 	float by = beacon.GetPositionY()
 	float bz = beacon.GetPositionZ()
@@ -138,6 +138,103 @@ Function R(int aiBaseID, float afX, float afY, float afZ, float afAX, float afAY
 	newRef.SetLinkedRef(beacon, kw)
 	newRef.Enable(false)
 	Debug.Trace("OSB: R new=" + newRef + " base=" + base + " workshop=" + newRef.GetWorkshop() + " inBuildableArea=" + newRef.IsWithinBuildableArea(beacon))
+EndFunction
+
+; One object, placed relative to the beacon of the outpost the player is in.
+; afLX/afLY/afLZ: offset in the old beacon's local frame (meters); afRelAZ: heading relative to the old beacon.
+; make-restore.ps1 computes these, so the layout follows the new beacon's position and heading.
+Function RR(int aiBaseID, float afLX, float afLY, float afLZ, float afAX, float afAY, float afRelAZ, float afScale) global
+	ObjectReference beacon = FindBeacon()
+	if beacon == None
+		Debug.Notification("OSB: no outpost beacon within 300 m")
+		Debug.Trace("OSB: RR no beacon")
+		return
+	endif
+	float yaw = beacon.GetAngleZ()
+	float c = Math.cos(yaw)   ; Papyrus Math.cos/sin take degrees
+	float s = Math.sin(yaw)
+	; heading is clockwise from +Y: local (x, y) -> world (x*c + y*s, -x*s + y*c)
+	float wx = beacon.GetPositionX() + afLX * c + afLY * s
+	float wy = beacon.GetPositionY() - afLX * s + afLY * c
+	float wz = beacon.GetPositionZ() + afLZ
+	R(aiBaseID, wx, wy, wz, afAX, afAY, afRelAZ + yaw, afScale)
+EndFunction
+
+; ---------- guidance ----------
+; Local coordinates are measured from the center of the current landing zone, so they only
+; match the backup when you land at the same spot (e.g. same latitude/longitude).
+
+; Print planet, landing-zone position of the player and of the nearest outpost beacon.
+Function Where() global
+	Actor player = Game.GetPlayer()
+	string msg = "OSB: Where planet=" + player.GetCurrentPlanet() + " player=(" + player.GetPositionX() + "," + player.GetPositionY() + "," + player.GetPositionZ() + ") heading=" + player.GetAngleZ()
+	ObjectReference beacon = FindBeacon()
+	if beacon
+		msg += " beacon=" + beacon + " pos=(" + beacon.GetPositionX() + "," + beacon.GetPositionY() + "," + beacon.GetPositionZ() + ") yaw=" + beacon.GetAngleZ()
+	endif
+	Debug.Trace(msg)
+	Debug.Notification("OSB: you are at " + Math.Floor(player.GetPositionX()) + ", " + Math.Floor(player.GetPositionY()) + ", " + Math.Floor(player.GetPositionZ()))
+EndFunction
+
+; atan2 in degrees, heading convention: 0 = +Y, clockwise positive
+float Function HeadingTo(float afDX, float afDY) global
+	if afDX == 0.0 && afDY == 0.0
+		return 0.0
+	endif
+	float a
+	if Math.abs(afDY) >= Math.abs(afDX)
+		a = Math.atan(afDX / afDY)
+		if afDY < 0.0
+			a += 180.0
+		endif
+	else
+		a = 90.0 - Math.atan(afDY / afDX)
+		if afDX < 0.0
+			a += 180.0
+		endif
+	endif
+	while a > 180.0
+		a -= 360.0
+	endwhile
+	while a <= -180.0
+		a += 360.0
+	endwhile
+	return a
+EndFunction
+
+; Walk the player to a landing-zone position (the old beacon spot). Updates every 2 s for up to
+; aiSeconds (default 180), stops when within 1.5 m. Notification text is ASCII on purpose.
+Function Guide(float afX, float afY, float afZ, int aiSeconds = 180) global
+	Actor player = Game.GetPlayer()
+	int elapsed = 0
+	while elapsed < aiSeconds
+		float dx = afX - player.GetPositionX()
+		float dy = afY - player.GetPositionY()
+		float dz = afZ - player.GetPositionZ()
+		float dist = Math.sqrt(dx * dx + dy * dy)
+		if dist < 1.5
+			Debug.Notification("OSB: you are on the old beacon spot (height " + Math.Floor(dz * 10.0) / 10.0 + " m). Place the beacon here.")
+			Debug.Trace("OSB: Guide arrived dz=" + dz)
+			return
+		endif
+		float turn = HeadingTo(dx, dy) - player.GetAngleZ()
+		while turn > 180.0
+			turn -= 360.0
+		endwhile
+		while turn <= -180.0
+			turn += 360.0
+		endwhile
+		string dir = "ahead"
+		if turn > 20.0
+			dir = "turn right " + Math.Floor(turn) + " deg"
+		elseif turn < -20.0
+			dir = "turn left " + Math.Floor(-turn) + " deg"
+		endif
+		Debug.Notification("OSB: old beacon " + Math.Floor(dist) + " m, " + dir + ", height " + Math.Floor(dz) + " m")
+		Utility.Wait(2.0)
+		elapsed += 2
+	endwhile
+	Debug.Notification("OSB: guide timed out, run bat OSB_Guide again")
 EndFunction
 
 Function Done(int aiExpected) global
