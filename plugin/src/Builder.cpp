@@ -7,6 +7,7 @@
 #include "Builder.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -52,11 +53,29 @@ namespace OSB::Builder
 		std::atomic<std::uint32_t> g_placed{ 0 };    // Workshop::ItemPlacedEvent count
 		constexpr float kSmallObject = 20.0f;        // m^2 footprint: furniture and decorations
 
+		std::atomic<std::uint32_t> g_jobForm{ 0 };   // base of the object being built
+		std::mutex g_placedLock;
+		std::array<float, 4> g_placedAt{};           // x y z, angle z (radians) of the last placed object
+		bool g_placedValid = false;
+		std::vector<std::string> g_offList;          // objects not at their saved spot (checked after each build)
+
 		class PlacedSink : public RE::BSTEventSink<RE::Workshop::ItemPlacedEvent>
 		{
 		public:
-			RE::BSEventNotifyControl ProcessEvent(const RE::Workshop::ItemPlacedEvent&, RE::BSTEventSource<RE::Workshop::ItemPlacedEvent>*) override
+			RE::BSEventNotifyControl ProcessEvent(const RE::Workshop::ItemPlacedEvent& a_event, RE::BSTEventSource<RE::Workshop::ItemPlacedEvent>*) override
 			{
+				// the object itself, or for a PackIn its group dummy (OutpostGroupPackinDummy 0x15804)
+				if (auto* ref = a_event.item.get()) {
+					const auto* base = ref->GetBaseObject();
+					const auto id = base ? base->GetFormID() : 0;
+					if (id && (id == g_jobForm.load() || id == 0x15804)) {
+						const auto p = ref->GetPosition();
+						const auto r = ref->GetAngle();
+						std::scoped_lock l(g_placedLock);
+						g_placedAt = { p.x, p.y, p.z, r.z };
+						g_placedValid = true;
+					}
+				}
 				++g_placed;
 				return RE::BSEventNotifyControl::kContinue;
 			}
@@ -212,6 +231,9 @@ namespace OSB::Builder
 				std::scoped_lock l(g_targetLock);
 				height = g_tz;
 				rotation = g_tyaw;
+				// x y come from the anchor (+0x480): where the first commit put the hab (maybe a snap point)
+				*reinterpret_cast<float*>(e + 0x480) = g_tx;
+				*reinterpret_cast<float*>(e + 0x484) = g_ty;
 			}
 			const auto r = g_foundation(a_engine, a_2);
 			if (g_logFoundation.exchange(false)) {
@@ -236,6 +258,28 @@ namespace OSB::Builder
 				if (status != kStatusOk && (g_forceAll.load() || status == 0x18 || status == 4)) {
 					REX::INFO("builder: commit with status {} forced", status);
 					status = kStatusOk;
+				}
+				if constexpr (I == 0) {
+					// placement: the preview may have moved to a snap point (another hab's connection, another
+					// wall); put it back on the saved spot and angle, drop the snap, re-apply (item vfunc 0xE0)
+					const auto e = reinterpret_cast<std::uintptr_t>(a_engine);
+					auto* p = reinterpret_cast<float*>(e + kPreviewPos);
+					{
+						std::scoped_lock l(g_targetLock);
+						if (std::abs(p[0] - g_tx) > 0.05f || std::abs(p[1] - g_ty) > 0.05f || std::abs(p[2] - g_tz) > 0.05f) {
+							REX::INFO("builder: preview at {:.2f} {:.2f} {:.2f} moved back to {:.2f} {:.2f} {:.2f}", p[0], p[1], p[2], g_tx, g_ty, g_tz);
+						}
+						p[0] = g_tx;
+						p[1] = g_ty;
+						p[2] = g_tz;
+						*reinterpret_cast<float*>(e + kYaw) = g_tyaw;
+					}
+					*reinterpret_cast<std::uint8_t*>(e + 0x188) = 0;
+					*reinterpret_cast<std::uint8_t*>(e + 0x18A) = 0;
+					if (auto* item = *reinterpret_cast<void**>(e + kItem)) {
+						using apply_t = void (*)(void*, void*);
+						(*reinterpret_cast<apply_t**>(item))[0xE0 / 8](item, a_engine);
+					}
 				}
 				if constexpr (I == 2) {
 					const auto e = reinterpret_cast<std::uintptr_t>(a_engine);
@@ -485,6 +529,11 @@ namespace OSB::Builder
 				REX::INFO("builder: {} ({:08X}) status {}: later", a_job.name, a_job.formID, status);
 				return false;
 			}
+			{
+				std::scoped_lock l(g_placedLock);
+				g_placedValid = false;
+			}
+			g_jobForm = a_job.formID;
 			const auto placedBefore = g_placed.load();
 			// a hab goes to the auto-foundation state on the first commit and needs another commit there
 			// (like confirming the foundation by hand): habs get up to 3 commits, other objects one
@@ -501,6 +550,30 @@ namespace OSB::Builder
 			std::this_thread::sleep_for(std::chrono::milliseconds(100));
 			REX::INFO("builder: {} ({:08X}, size {:.0f}) at {:.2f} {:.2f} {:.2f} (target {:.2f} {:.2f} {:.2f}) status {} -> {}", a_job.name, a_job.formID, a_job.size,
 				p[0], p[1], p[2], a_job.x, a_job.y, a_job.z, status, committed ? "built" : "not built");
+			if (committed) {
+				// check where it really went
+				std::array<float, 4> at{};
+				bool valid;
+				{
+					std::scoped_lock l(g_placedLock);
+					at = g_placedAt;
+					valid = g_placedValid;
+				}
+				if (valid) {
+					const float yaw = a_job.yawDeg * std::numbers::pi_v<float> / 180.0f;
+					float dAng = std::remainder(at[3] - yaw, 2.0f * std::numbers::pi_v<float>) * 180.0f / std::numbers::pi_v<float>;
+					const float dPos = std::hypot(at[0] - a_job.x, at[1] - a_job.y);
+					const float dZ = at[2] - a_job.z;
+					if (dPos > 0.3f || std::abs(dZ) > 0.3f || std::abs(dAng) > 5.0f) {
+						auto line = std::format("{} at {:.2f} {:.2f} {:.2f} (saved {:.2f} {:.2f} {:.2f}): off {:.2f} m, height {:+.2f} m, angle {:+.0f} deg",
+							a_job.name, at[0], at[1], at[2], a_job.x, a_job.y, a_job.z, dPos, dZ, dAng);
+						REX::WARN("builder: check: {}", line);
+						g_offList.push_back(std::move(line));
+					}
+				} else {
+					REX::INFO("builder: check: {} placed, but its reference was not reported", a_job.name);
+				}
+			}
 			return committed;
 		}
 
@@ -621,6 +694,10 @@ namespace OSB::Builder
 			g_forcing = false;
 			PostCancel();   // drop the last preview the engine re-offers after a commit
 			REX::INFO("builder: done, built {}, failed {}, of {}", g_built.load(), g_failed.load(), g_total.load());
+			REX::INFO("builder: check: {} built objects not at their saved spot", g_offList.size());
+			for (const auto& line : g_offList) {
+				REX::INFO("builder: check:   {}", line);
+			}
 			g_running = false;
 		}
 	}
@@ -672,6 +749,7 @@ namespace OSB::Builder
 		g_stop = false;
 		g_aborted = false;
 		g_done = 0;
+		g_offList.clear();
 		g_built = 0;
 		g_failed = 0;
 		g_total = std::int32_t(a_jobs.size());
