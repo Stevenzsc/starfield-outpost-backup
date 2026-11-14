@@ -35,6 +35,7 @@ namespace OSB::Builder
 		constexpr std::ptrdiff_t kUpdateCallOff = 0x57;     // call 21D74B0
 		constexpr REL::ID kStateUpdateFoundation{ 121270 };  // +0x21B2470 (StateUpdateAutoFoundation vfunc 0x130)
 		constexpr std::ptrdiff_t kFoundationCallOff = 0x52;  // call 21D5CE0 (per-frame foundation height)
+		constexpr REL::ID kRotation{ 883651 };               // +0x5E757C8 float: build-mode rotation (radians)
 
 		// engine fields
 		constexpr std::ptrdiff_t kItem = 0x268;      // shared_ptr<WorkshopItem> current preview
@@ -148,17 +149,20 @@ namespace OSB::Builder
 			const auto e = reinterpret_cast<std::uintptr_t>(a_engine);
 			auto& fixed = *reinterpret_cast<std::uint8_t*>(e + 0x198);
 			auto& height = *reinterpret_cast<float*>(e + 0x19C);
+			// this state also takes the yaw (+0x184) from the build-mode rotation global, not from the item
+			auto& rotation = *reinterpret_cast<float*>(kRotation.address());
 			const auto oldFixed = fixed;
 			const auto oldHeight = height;
 			fixed = 1;
 			{
 				std::scoped_lock l(g_targetLock);
 				height = g_tz;
+				rotation = g_tyaw;
 			}
 			const auto r = g_foundation(a_engine, a_2);
 			if (g_logFoundation.exchange(false)) {
-				REX::INFO("builder: foundation height {:.2f} -> preview z {:.2f} (allowed {:.2f}..{:.2f})", height,
-					*reinterpret_cast<float*>(e + 0x140), *reinterpret_cast<float*>(e + 0x1A0), *reinterpret_cast<float*>(e + 0x1A4));
+				REX::INFO("builder: foundation height {:.2f} -> preview z {:.2f} (allowed {:.2f}..{:.2f}) yaw {:.3f}", height,
+					*reinterpret_cast<float*>(e + 0x140), *reinterpret_cast<float*>(e + 0x1A0), *reinterpret_cast<float*>(e + 0x1A4), *reinterpret_cast<float*>(e + kYaw));
 			}
 			fixed = oldFixed;
 			height = oldHeight;
