@@ -71,6 +71,18 @@ static class Program
         return $"{ins.IP - pe.ImageBase:X8}  {o.ToStringAndReset()}";
     }
 
+    // "  ; "text"" when the instruction's RIP-relative operand points at a printable C string
+    static string Str(Pe pe, Instruction ins)
+    {
+        if (!ins.IsIPRelativeMemoryOperand) return "";
+        long f = pe.ToFile((uint)(ins.IPRelativeMemoryAddress - pe.ImageBase));
+        if (f < 0 || f >= pe.Data.Length) return "";
+        int n = 0;
+        while (f + n < pe.Data.Length && n < 120 && pe.Data[f + n] >= 0x20 && pe.Data[f + n] < 0x7F) n++;
+        if (n < 4 || f + n >= pe.Data.Length || pe.Data[f + n] != 0) return "";
+        return "    ; \"" + System.Text.Encoding.ASCII.GetString(pe.Data, (int)f, n) + "\"";
+    }
+
     static int Main(string[] a)
     {
         if (a.Length < 3) { Console.WriteLine("usage: xref refs|calls|func|dis <exe> ..."); return 1; }
@@ -158,7 +170,56 @@ static class Program
                 var f = pe.FuncOf(H(a[2]));
                 if (f.end == 0) { Console.WriteLine("no .pdata entry"); return 2; }
                 Console.WriteLine($"; func {f.begin:X8}-{f.end:X8}");
-                foreach (var ins in pe.Decode(f.begin, f.end)) Console.WriteLine(Show(pe, ins));
+                foreach (var ins in pe.Decode(f.begin, f.end)) Console.WriteLine(Show(pe, ins) + Str(pe, ins));
+                break;
+            }
+            case "vtref":
+            {
+                // 8-byte pointers to rva in data sections; for vtables print slot and the RTTI class name
+                ulong want = pe.ImageBase + H(a[2]);
+                foreach (var s in pe.Sections.Where(s => s.name == ".rdata" || s.name == ".data"))
+                    for (uint o = 0; o + 8 <= s.rawSize; o += 8)
+                    {
+                        if (BitConverter.ToUInt64(pe.Data, (int)(s.raw + o)) != want) continue;
+                        uint at = s.va + o;
+                        // walk back to the vtable start: the slot before it holds a COL pointer
+                        string name = "?"; int slot = -1;
+                        for (int k = 0; k < 400; k++)
+                        {
+                            uint p = at - (uint)(k + 1) * 8;
+                            long fo = pe.ToFile(p); if (fo < 0) break;
+                            ulong col = BitConverter.ToUInt64(pe.Data, (int)fo);
+                            if (col < pe.ImageBase || col > pe.ImageBase + 0x10000000) break;
+                            long cf = pe.ToFile((uint)(col - pe.ImageBase));
+                            if (cf >= 0 && BitConverter.ToUInt32(pe.Data, (int)cf) == 1 && BitConverter.ToUInt32(pe.Data, (int)cf + 20) == (uint)(col - pe.ImageBase))
+                            {
+                                uint td = BitConverter.ToUInt32(pe.Data, (int)cf + 12);
+                                long tf = pe.ToFile(td + 16);
+                                if (tf >= 0) { int n = 0; while (pe.Data[tf + n] != 0 && n < 200) n++; name = System.Text.Encoding.ASCII.GetString(pe.Data, (int)tf, n); }
+                                slot = k; break;
+                            }
+                        }
+                        Console.WriteLine($"{at:X8}  slot {slot} (0x{slot * 8:X})  {name}");
+                    }
+                break;
+            }
+            case "strs":
+            {
+                // strings and calls referenced by each function given (comma separated rvas)
+                foreach (var r in a[2].Split(',').Select(H))
+                {
+                    var f = pe.FuncOf(r);
+                    if (f.end == 0) { Console.WriteLine($"; {r:X8}: no .pdata entry"); continue; }
+                    Console.WriteLine($"; func {f.begin:X8}-{f.end:X8} ({f.end - f.begin} bytes)");
+                    var calls = new List<string>();
+                    foreach (var ins in pe.Decode(f.begin, f.end))
+                    {
+                        var s = Str(pe, ins);
+                        if (s.Length > 0) Console.WriteLine($"   {ins.IP - pe.ImageBase:X8}{s}");
+                        if (ins.FlowControl == FlowControl.Call && ins.Op0Kind == OpKind.NearBranch64) calls.Add($"{ins.NearBranch64 - pe.ImageBase:X}");
+                    }
+                    Console.WriteLine("   calls: " + string.Join(" ", calls.Distinct()));
+                }
                 break;
             }
             case "dis":
