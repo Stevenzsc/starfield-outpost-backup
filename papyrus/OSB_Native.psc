@@ -14,7 +14,7 @@ Function Unlock() global native
 ; Objects without a workshop recipe (parts the game spawns for habs) are left out.
 bool Function BeginBackup(ObjectReference akBeacon, Location akPlanetLoc, Location[] akPlanetParents, Location akHereLoc, float afBeaconX, float afBeaconY, float afBeaconZ, float afBeaconYaw) global native
 ; Add one object (plugin + local ID are worked out by the plugin). afPackIn: base is a PackIn.
-bool Function AddItem(Form akBase, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale, bool abPackIn) global native
+bool Function AddItem(Form akBase, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale, bool abPackIn, int aiRefID) global native
 ; Write the backup file; returns the number of objects, 0 if there was nothing to save, -1 on failure.
 ; Backing up the same outpost again replaces its backup (LastBackupReplaced is then true).
 int Function EndBackup() global native

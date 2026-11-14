@@ -2,7 +2,7 @@
 includes("lib/commonlibsf")
 
 set_project("OutpostBackup")
-set_version("0.5.0")
+set_version("0.6.0")
 set_license("GPL-3.0")
 set_languages("c++23")
 set_warnings("allextra")

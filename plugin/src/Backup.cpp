@@ -43,7 +43,7 @@ namespace OSB
 		// BGSPlanet::Manager (static object), see docs: +0x80 planet, +0x98 lon, +0xA0 lat (radians), +0x100 radius km
 		constexpr REL::ID kPlanetManager{ 945580 };
 
-		constexpr std::int32_t kVersion = 5;
+		constexpr std::int32_t kVersion = 6;
 
 		// OSB_PickMsg layout (see tools\esp): button 0 Cancel, 1 More..., 2..9 entries
 		constexpr std::size_t kPickEntries = 8;
@@ -57,6 +57,7 @@ namespace OSB
 			std::uint32_t local{ 0 };
 			float x{}, y{}, z{}, ax{}, ay{}, az{}, scale{ 1.0f };
 			bool  pack{ false };
+			std::uint32_t ref{ 0 };   // the object's reference form ID when backed up (FF...: rises in build order)
 		};
 
 		struct Backup
@@ -369,7 +370,7 @@ namespace OSB
 			o << "beacon\t" << b.bx << '\t' << b.by << '\t' << b.bz << '\t' << b.byaw << '\n';
 			for (const auto& it : b.items) {
 				o << "item\t" << it.plugin << '\t' << std::format("{:X}", it.local) << '\t' << it.x << '\t' << it.y << '\t' << it.z << '\t'
-				  << it.ax << '\t' << it.ay << '\t' << it.az << '\t' << it.scale << '\t' << (it.pack ? 1 : 0) << '\n';
+				  << it.ax << '\t' << it.ay << '\t' << it.az << '\t' << it.scale << '\t' << (it.pack ? 1 : 0) << '\t' << std::format("{:08X}", it.ref) << '\n';
 			}
 			return o.str();
 		}
@@ -420,6 +421,9 @@ namespace OSB
 						it.ax = float(num(6)); it.ay = float(num(7)); it.az = float(num(8));
 						it.scale = float(num(9));
 						it.pack = t[10] == "1";
+						if (t.size() >= 12) {
+							it.ref = std::stoul(t[11], nullptr, 16);
+						}
 						b.items.push_back(std::move(it));
 					} else if (t[0] == "name" && t.size() >= 2) {
 						b.name = t[1];
@@ -626,7 +630,7 @@ namespace OSB
 			return true;
 		}
 
-		bool AddItem(std::monostate, RE::TESForm* a_base, float x, float y, float z, float ax, float ay, float az, float scale, bool a_pack)
+		bool AddItem(std::monostate, RE::TESForm* a_base, float x, float y, float z, float ax, float ay, float az, float scale, bool a_pack, std::int32_t a_refID)
 		{
 			if (!a_base) {
 				return false;
@@ -646,7 +650,7 @@ namespace OSB
 				++g_skipped;   // part spawned by a hab or other object; comes back with its parent
 				return false;
 			}
-			g_pending.items.push_back({ plugin, local, x, y, z, ax, ay, az, scale, a_pack });
+			g_pending.items.push_back({ plugin, local, x, y, z, ax, ay, az, scale, a_pack, static_cast<std::uint32_t>(a_refID) });
 			return true;
 		}
 
@@ -1059,7 +1063,7 @@ namespace OSB
 					if (!std::isfinite(size) || size < 0 || size > 1e6f) {
 						size = 0;
 					}
-					jobs.push_back({ form->GetFormID(), it.x, it.y, it.z, it.az, std::format("{} {:X}", it.plugin, it.local), size });
+					jobs.push_back({ form->GetFormID(), it.x, it.y, it.z, it.az, std::format("{} {:X}", it.plugin, it.local), size, it.ref });
 				}
 			}
 			return !jobs.empty() && Builder::Start(std::move(jobs));

@@ -588,6 +588,16 @@ namespace OSB::Builder
 			if (n < 2) {
 				return;
 			}
+			// backups from 0.6 on keep each object's reference ID; it rises in the order the player built,
+			// and that order snapped every hab right once: replay it
+			if (std::all_of(a_jobs.begin(), bigEnd, [](const Job& j) { return j.order != 0; })) {
+				std::stable_sort(a_jobs.begin(), bigEnd, [](const Job& a, const Job& b) { return a.order < b.order; });
+				for (std::size_t i = 0; i < n; ++i) {
+					const auto& j = a_jobs[i];
+					REX::INFO("builder: hab order {} (as built, ref {:08X}): {} at {:.2f} {:.2f} {:.2f}", i + 1, j.order, j.name, j.x, j.y, j.z);
+				}
+				return;
+			}
 			auto radius = [](const Job& j) { return 0.5f * std::sqrt(j.size); };
 			std::vector<std::vector<std::size_t>> links(n);
 			for (std::size_t i = 0; i < n; ++i) {

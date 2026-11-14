@@ -34,7 +34,7 @@ Function Notify(string asText)
 EndFunction
 
 Event OnRead()
-	if OSB_Native.Version() < 5
+	if OSB_Native.Version() < 6
 		Debug.MessageBox("Outpost Backup: the SFSE plugin is missing or out of date.\n\nInstall Data\\SFSE\\Plugins\\OutpostBackup.dll and start the game with SFSE (sfse_loader.exe).")
 		return
 	endif
@@ -208,7 +208,7 @@ Function DoBackup()
 		if r && r != beacon
 			Form base = r.GetBaseObject()
 			if OSB_Native.IsBuildable(base) && !OSB.IsSkippedBase(base) && !OnBeacon(r, beacon)
-				OSB_Native.AddItem(base, r.GetPositionX(), r.GetPositionY(), r.GetPositionZ(), r.GetAngleX(), r.GetAngleY(), r.GetAngleZ(), r.GetScale(), (base as PackIn) != None)
+				OSB_Native.AddItem(base, r.GetPositionX(), r.GetPositionY(), r.GetPositionZ(), r.GetAngleX(), r.GetAngleY(), r.GetAngleZ(), r.GetScale(), (base as PackIn) != None, r.GetFormID())
 			endif
 		endif
 		i += 1
