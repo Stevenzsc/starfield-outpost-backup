@@ -29,4 +29,7 @@ namespace OSB::Builder
 
 	// Ask the worker to stop after the current object.
 	void Stop();
+
+	// True while build mode holds an item in placement.
+	bool IsPlacing();
 }

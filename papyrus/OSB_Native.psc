@@ -68,3 +68,5 @@ bool Function AutoBuild() global native
 ; [done, built, failed, total, running(0/1)]
 int[] Function AutoBuildProgress() global native
 Function AutoBuildStop() global native
+; True while build mode holds an item in placement (e.g. a beacon being positioned).
+bool Function IsPlacing() global native

@@ -1035,6 +1035,11 @@ namespace OSB
 			return Builder::Progress();
 		}
 
+		bool IsPlacing(std::monostate)
+		{
+			return Builder::IsPlacing();
+		}
+
 		void AutoBuildStop(std::monostate)
 		{
 			Builder::Stop();
@@ -1101,6 +1106,7 @@ namespace OSB
 		vm->BindNativeMethod(obj, "AutoBuild", AutoBuild, true, false);
 		vm->BindNativeMethod(obj, "AutoBuildProgress", AutoBuildProgress, true, false);
 		vm->BindNativeMethod(obj, "AutoBuildStop", AutoBuildStop, true, false);
+		vm->BindNativeMethod(obj, "IsPlacing", IsPlacing, true, false);
 		REX::INFO("papyrus: OSB_Native registered (version {})", kVersion);
 	}
 }

@@ -433,4 +433,9 @@ namespace OSB::Builder
 	{
 		g_stop = true;
 	}
+
+	bool IsPlacing()
+	{
+		return Field<void*>(kItem) != nullptr;
+	}
 }

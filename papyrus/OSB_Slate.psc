@@ -112,13 +112,21 @@ float Function Distance2D(float afX1, float afY1, float afX2, float afY2)
 	return Math.Sqrt(dx * dx + dy * dy)
 EndFunction
 
-; The outpost beacon near the saved spot, or None.
+; The outpost beacon near the saved spot, or None. A beacon still being placed in build mode (the preview)
+; does not count: nothing may be in placement, and a real beacon already has its parts linked to it.
 ObjectReference Function BeaconNearSpot(float[] akSpot)
 	ObjectReference b = OSB.FindBeacon()
-	if b && Distance2D(b.GetPositionX(), b.GetPositionY(), akSpot[0], akSpot[1]) <= kBeaconNearMeters
-		return b
+	if b == None || Distance2D(b.GetPositionX(), b.GetPositionY(), akSpot[0], akSpot[1]) > kBeaconNearMeters
+		return None
 	endif
-	return None
+	if OSB_Native.IsPlacing() || b.IsDisabled()
+		return None
+	endif
+	ObjectReference[] parts = b.GetRefsLinkedToMe(OSB.GetWorkshopItemKeyword())
+	if parts == None || parts.Length == 0
+		return None
+	endif
+	return b
 EndFunction
 
 ; ---------- choosing a saved outpost ----------
@@ -392,8 +400,11 @@ ObjectReference Function WaitForBeacon(int aiFlow, float[] akSpot)
 		endif
 		ObjectReference b = BeaconNearSpot(akSpot)
 		if b
-			Utility.Wait(2.0)   ; let the build finish
-			return b
+			Utility.Wait(2.0)   ; let the build finish, then check again
+			if BeaconNearSpot(akSpot) == b
+				Utility.Wait(1.0)
+				return b
+			endif
 		endif
 	endwhile
 	Notify("no beacon built. Choose Restore when the beacon is ready.")
