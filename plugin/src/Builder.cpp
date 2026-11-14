@@ -328,9 +328,16 @@ namespace OSB::Builder
 				return false;
 			}
 			const auto placedBefore = g_placed.load();
-			PostCommit();
-			// the engine needs up to a few seconds for a hab (foundations); wait for the placed event
-			const bool committed = WaitFor([&] { return g_placed.load() != placedBefore; }, 15000);
+			// a hab goes to the auto-foundation state on the first commit and needs another commit there
+			// (like confirming the foundation by hand): commit again until something is placed
+			bool committed = false;
+			for (int attempt = 1; attempt <= 5 && !committed && !g_aborted.load(); ++attempt) {
+				PostCommit();
+				committed = WaitFor([&] { return g_placed.load() != placedBefore; }, attempt == 1 ? 2000 : 3000);
+				if (!committed) {
+					REX::INFO("builder: {} not placed after commit {}, committing again", a_job.name, attempt);
+				}
+			}
 			std::this_thread::sleep_for(std::chrono::milliseconds(300));
 			REX::INFO("builder: {} ({:08X}, size {:.0f}) at {:.2f} {:.2f} {:.2f} (target {:.2f} {:.2f} {:.2f}) status {} -> {}", a_job.name, a_job.formID, a_job.size,
 				p[0], p[1], p[2], a_job.x, a_job.y, a_job.z, status, committed ? "built" : "not built");
