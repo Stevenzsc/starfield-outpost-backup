@@ -202,6 +202,16 @@ namespace OSB::Builder
 					const auto* p = reinterpret_cast<const float*>(e + kPreviewPos);
 					REX::INFO("builder: commit in snapped state: snap {} substate {} at {:.2f} {:.2f} {:.2f}",
 						*reinterpret_cast<std::uint8_t*>(e + 0x188), *reinterpret_cast<std::uint8_t*>(e + 0x630), p[0], p[1], p[2]);
+					float tx, ty, tz;
+					{
+						std::scoped_lock l(g_targetLock);
+						tx = g_tx; ty = g_ty; tz = g_tz;
+					}
+					// snapped to some other connection point: better not built than built in the wrong place
+					if (std::abs(p[0] - tx) > 1.0f || std::abs(p[1] - ty) > 1.0f || std::abs(p[2] - tz) > 1.0f) {
+						REX::INFO("builder: snap point is not the saved spot {:.2f} {:.2f} {:.2f}: not committing", tx, ty, tz);
+						return 0;
+					}
 				}
 			}
 			return g_onCommit[I](a_state, a_event, a_engine, a_4);
@@ -466,6 +476,11 @@ namespace OSB::Builder
 	void Install()
 	{
 		g_aim = HookCall<Aim_t>(kUpdatePlacement, kAimCallOff, &AimHook, "preview aim (21CE760)");
+		// the snapped state aims again every frame (21B4EC0 +0x9D, same 21CE760) and moves to the snap point
+		// nearest that aim: aim it at the saved spot too, or it snaps where the player happens to look
+		if (auto snapAim = HookCall<Aim_t>(REL::ID(121290), 0x9D, &AimHook, "snapped aim (21CE760)"); snapAim && snapAim != g_aim) {
+			REX::WARN("builder: snapped aim calls {:X}, placement aim {:X}", reinterpret_cast<std::uintptr_t>(snapAim), reinterpret_cast<std::uintptr_t>(g_aim));
+		}
 		g_precheck = HookCall<Precheck_t>(kUpdatePlacement, kPrecheckCallOff, &PrecheckHook, "placement pre-check (21D3DD0)");
 		g_update = HookCall<Update_t>(kStateUpdatePlacement, kUpdateCallOff, &UpdateHook, "placement update (21D74B0)");
 		g_foundation = HookCall<Foundation_t>(kStateUpdateFoundation, kFoundationCallOff, &FoundationHook, "foundation height (21D5CE0)");
