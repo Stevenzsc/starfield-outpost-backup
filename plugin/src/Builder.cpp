@@ -310,14 +310,14 @@ namespace OSB::Builder
 
 		bool WaitFor(auto a_cond, int a_ms)
 		{
-			for (int t = 0; t < a_ms; t += 50) {
+			for (int t = 0; t < a_ms; t += 20) {
 				if (a_cond()) {
 					return true;
 				}
 				if (g_aborted.load()) {
 					return false;
 				}
-				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				std::this_thread::sleep_for(std::chrono::milliseconds(20));
 			}
 			return a_cond();
 		}
@@ -347,8 +347,8 @@ namespace OSB::Builder
 				WaitFor([&] {
 					const auto& p = Field<float[3]>(kPreviewPos);
 					return std::abs(p[0] - a_job.x) < 0.5f && std::abs(p[1] - a_job.y) < 0.5f;
-				}, 2000);
-				std::this_thread::sleep_for(std::chrono::milliseconds(300));   // 3D load and snapping settle
+				}, 1000);
+				std::this_thread::sleep_for(std::chrono::milliseconds(150));   // 3D load and snapping settle
 			}
 			const auto& p = Field<float[3]>(kPreviewPos);
 			const auto status = Field<std::uint8_t>(kStatus);
@@ -362,18 +362,25 @@ namespace OSB::Builder
 				REX::INFO("builder: {} ({:08X}, size {:.0f}) at height {:.2f}, saved {:.2f}: later", a_job.name, a_job.formID, a_job.size, p[2], a_job.z);
 				return false;
 			}
+			// early passes: a status the commit hook will not force would only be refused; try it next pass
+			if (!g_forceAll.load() && status != kStatusOk && status != 4 && status != 0x18) {
+				REX::INFO("builder: {} ({:08X}) status {}: later", a_job.name, a_job.formID, status);
+				return false;
+			}
 			const auto placedBefore = g_placed.load();
 			// a hab goes to the auto-foundation state on the first commit and needs another commit there
-			// (like confirming the foundation by hand): commit again until something is placed
+			// (like confirming the foundation by hand): habs get up to 3 commits, other objects one
+			const bool hab = a_job.size >= kSmallObject;
+			const int attempts = hab ? 3 : 1;
 			bool committed = false;
-			for (int attempt = 1; attempt <= 5 && !committed && !g_aborted.load(); ++attempt) {
+			for (int attempt = 1; attempt <= attempts && !committed && !g_aborted.load(); ++attempt) {
 				PostCommit();
-				committed = WaitFor([&] { return g_placed.load() != placedBefore; }, attempt == 1 ? 2000 : 3000);
-				if (!committed) {
+				committed = WaitFor([&] { return g_placed.load() != placedBefore; }, hab ? 1500 : 1000);
+				if (!committed && attempt < attempts) {
 					REX::INFO("builder: {} not placed after commit {}, committing again", a_job.name, attempt);
 				}
 			}
-			std::this_thread::sleep_for(std::chrono::milliseconds(300));
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
 			REX::INFO("builder: {} ({:08X}, size {:.0f}) at {:.2f} {:.2f} {:.2f} (target {:.2f} {:.2f} {:.2f}) status {} -> {}", a_job.name, a_job.formID, a_job.size,
 				p[0], p[1], p[2], a_job.x, a_job.y, a_job.z, status, committed ? "built" : "not built");
 			return committed;
