@@ -504,6 +504,74 @@ namespace OSB::Builder
 			return committed;
 		}
 
+		// Habs snap to the habs already there, and the engine picks the connection nearest the aim, which is
+		// not always the saved one. So build the hab with the most neighbours first (nothing to snap to: it
+		// goes exactly to its saved spot), then always the hab touching the most built ones, lower floors first.
+		// Expects the big objects (size >= kSmallObject) at the front of a_jobs.
+		void OrderHabs(std::vector<Job>& a_jobs)
+		{
+			const auto bigEnd = std::ranges::find_if(a_jobs, [](const Job& j) { return j.size < kSmallObject; });
+			const std::size_t n = std::size_t(bigEnd - a_jobs.begin());
+			if (n < 2) {
+				return;
+			}
+			auto radius = [](const Job& j) { return 0.5f * std::sqrt(j.size); };
+			std::vector<std::vector<std::size_t>> links(n);
+			for (std::size_t i = 0; i < n; ++i) {
+				for (std::size_t k = i + 1; k < n; ++k) {
+					const auto& a = a_jobs[i];
+					const auto& b = a_jobs[k];
+					const float d = std::hypot(a.x - b.x, a.y - b.y);
+					// side by side, or stacked (one floor apart)
+					if (d < (radius(a) + radius(b)) * 1.15f + 1.0f && std::abs(a.z - b.z) < 5.0f) {
+						links[i].push_back(k);
+						links[k].push_back(i);
+					}
+				}
+			}
+			std::vector<bool> placed(n, false);
+			std::vector<Job> ordered;
+			ordered.reserve(n);
+			for (std::size_t step = 0; step < n; ++step) {
+				std::size_t best = n;
+				std::size_t bestLinked = 0;
+				for (std::size_t i = 0; i < n; ++i) {
+					if (placed[i]) {
+						continue;
+					}
+					const auto linked = std::size_t(std::ranges::count_if(links[i], [&](std::size_t k) { return placed[k]; }));
+					if (best == n) {
+						best = i;
+						bestLinked = linked;
+						continue;
+					}
+					const auto& c = a_jobs[i];
+					const auto& b = a_jobs[best];
+					// first hab: most neighbours; then: touches the most built habs, lower floor, more neighbours
+					bool better;
+					if (step > 0 && linked != bestLinked) {
+						better = linked > bestLinked;
+					} else if (step > 0 && std::abs(c.z - b.z) > 1.0f) {
+						better = c.z < b.z;
+					} else if (links[i].size() != links[best].size()) {
+						better = links[i].size() > links[best].size();
+					} else {
+						better = c.size > b.size;
+					}
+					if (better) {
+						best = i;
+						bestLinked = linked;
+					}
+				}
+				placed[best] = true;
+				const auto& j = a_jobs[best];
+				REX::INFO("builder: hab order {}: {} at {:.2f} {:.2f} {:.2f}, {} neighbours, {} already built", step + 1, j.name, j.x, j.y, j.z,
+					links[best].size(), bestLinked);
+				ordered.push_back(j);
+			}
+			std::ranges::move(ordered, a_jobs.begin());
+		}
+
 		// Passes: objects that the engine refuses (e.g. furniture before its hab exists) are retried after the
 		// others; the last pass forces every placement status to OK.
 		constexpr int kPasses = 3;
@@ -520,6 +588,7 @@ namespace OSB::Builder
 				if (a.z != b.z) return a.z < b.z;
 				return a.size > b.size;
 			});
+			OrderHabs(a_jobs);
 			std::vector<const Job*> todo;
 			for (const auto& job : a_jobs) {
 				todo.push_back(&job);
