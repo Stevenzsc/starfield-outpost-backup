@@ -16,12 +16,12 @@ if (-not (Test-Path $Meta)) { throw "No backup location file: $Meta" }
 $m = Get-Content $Meta -Raw | ConvertFrom-Json
 
 $target = Join-Path $Game "OSB_LandTarget.txt"
-$line = "{0} {1}" -f $m.originLat.ToString("R", $inv), $m.originLon.ToString("R", $inv)
+$line = "{0} {1}" -f ([double]$m.originLat).ToString("R", $inv), ([double]$m.originLon).ToString("R", $inv)
 [IO.File]::WriteAllText($target, $line + "`r`n", [Text.Encoding]::ASCII)
 
 # The beacon was at (beaconX, beaconY) meters from that center: write the guide too.
 $guide = Join-Path $Game "OSB_Guide.txt"
-[IO.File]::WriteAllLines($guide, [string[]]@("cgf `"OSB.Guide`" $($m.beaconX.ToString($inv)) $($m.beaconY.ToString($inv)) $($m.beaconZ.ToString($inv)) 300"), [Text.Encoding]::ASCII)
+[IO.File]::WriteAllLines($guide, [string[]]@("cgf `"OSB.Guide`" $(([double]$m.beaconX).ToString($inv)) $(([double]$m.beaconY).ToString($inv)) $(([double]$m.beaconZ).ToString($inv)) 300"), [Text.Encoding]::ASCII)
 
 Write-Host "Armed: next landing goes to lat $($m.originLat) lon $($m.originLon) (planet $($m.planet))"
 Write-Host "Wrote $target"
