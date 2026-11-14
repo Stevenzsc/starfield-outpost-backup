@@ -33,6 +33,8 @@
 #include <sstream>
 #include <unordered_set>
 
+extern "C" __declspec(dllimport) int __stdcall IsBadReadPtr(const void*, std::uintptr_t);
+
 namespace OSB
 {
 	namespace
@@ -189,6 +191,11 @@ namespace OSB
 			return std::sqrt(east * east + north * north);
 		}
 
+		bool Readable(std::uintptr_t a_addr, std::size_t a_size)
+		{
+			return a_addr > 0x10000 && !IsBadReadPtr(reinterpret_cast<const void*>(a_addr), a_size);
+		}
+
 		// ---------- buildable objects ----------
 
 		// Form IDs that a workshop recipe (COBJ) creates. Outpost refs also include parts the game spawns for
@@ -217,38 +224,37 @@ namespace OSB
 					REX::WARN("buildable: recipe layout check failed (created {:08X})", probeCobj->createdObject ? probeCobj->createdObject->GetFormID() : 0);
 					return;
 				}
-				constexpr std::size_t kArrays = std::extent_v<decltype(RE::TESDataHandler::formArrays)>;
-				for (std::size_t i = 0; i < kArrays; ++i) {
-					auto& arr = dh->formArrays[i].formArray;
-					RE::TESForm* first = nullptr;
-					for (auto& f : arr) {
-						if (f) {
-							first = f.get();
-							break;
-						}
+				// The per-type form arrays are not where the CommonLibSF header puts them in this game version:
+				// scan TESDataHandler for an array {u32 size, u32 capacity, TESForm** data} that holds the probe.
+				const auto dhAddr = reinterpret_cast<std::uintptr_t>(dh);
+				for (std::uintptr_t o = 0; o < 0x8000 && set.empty(); o += 8) {
+					if (!Readable(dhAddr + o, 16)) {
+						break;
 					}
-					if (!first || first->GetFormType() != type) {
+					const auto size = *reinterpret_cast<std::uint32_t*>(dhAddr + o);
+					const auto cap = *reinterpret_cast<std::uint32_t*>(dhAddr + o + 4);
+					const auto data = *reinterpret_cast<RE::TESForm***>(dhAddr + o + 8);
+					if (size == 0 || size > cap || size > 2000000 || !Readable(reinterpret_cast<std::uintptr_t>(data), std::size_t(size) * 8)) {
 						continue;
 					}
-					for (auto& f : arr) {
+					bool hasProbe = false;
+					for (std::uint32_t i = 0; i < size && !hasProbe; ++i) {
+						hasProbe = data[i] == probe;
+					}
+					if (!hasProbe) {
+						continue;
+					}
+					for (std::uint32_t i = 0; i < size; ++i) {
+						auto* f = data[i];
 						if (!f || f->GetFormType() != type) {
 							continue;
 						}
-						auto* cobj = reinterpret_cast<RE::BGSConstructibleObject*>(f.get());
+						auto* cobj = reinterpret_cast<RE::BGSConstructibleObject*>(f);
 						if (cobj->createdObject) {
 							set.insert(cobj->createdObject->GetFormID());
 						}
 					}
-					REX::INFO("buildable: recipe array {} (form type {}, {} recipes)", i, std::to_underlying(type), arr.size());
-					break;
-				}
-				if (set.empty()) {
-					for (std::size_t i = 0; i < kArrays; ++i) {
-						auto& arr = dh->formArrays[i].formArray;
-						if (!arr.empty() && arr[0]) {
-							REX::INFO("buildable: array {} size {} first {:08X} type {}", i, arr.size(), arr[0]->GetFormID(), std::to_underlying(arr[0]->GetFormType()));
-						}
-					}
+					REX::INFO("buildable: recipe array at TESDataHandler+{:X} (form type {}, {} recipes)", o, std::to_underlying(type), size);
 				}
 				REX::INFO("buildable: {} objects have a workshop recipe", set.size());
 			});
