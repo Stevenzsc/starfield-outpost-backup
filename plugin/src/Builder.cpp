@@ -272,6 +272,48 @@ namespace OSB::Builder
 			REX::INFO("builder: hooked {}", a_name);
 		}
 
+		// StateUpdatePlacement vfunc 0x98 (21B40E0): the "snapped" event. It carries the snap position
+		// (event+0x08, x y z) and the hab snapped to (event+0x18), copies them to engine+0x480/+0x490 and
+		// switches to StateUpdateSnapped. The engine picks the connection nearest the aim, not always the
+		// saved one: drop the event then, so the hab stays in placement at its saved spot.
+		using SnapEvent_t = std::uintptr_t (*)(void* a_state, void* a_event, void* a_engine, void* a_4);
+		SnapEvent_t g_snapEvent = nullptr;
+
+		std::uintptr_t SnapEventHook(void* a_state, void* a_event, void* a_engine, void* a_4)
+		{
+			if (g_forcing.load() && a_event) {
+				const auto* p = reinterpret_cast<const float*>(reinterpret_cast<std::uintptr_t>(a_event) + 0x08);
+				float tx, ty, tz;
+				{
+					std::scoped_lock l(g_targetLock);
+					tx = g_tx; ty = g_ty; tz = g_tz;
+				}
+				const bool match = std::abs(p[0] - tx) < 1.0f && std::abs(p[1] - ty) < 1.0f && std::abs(p[2] - tz) < 1.0f;
+				if (g_logSnap.exchange(false)) {
+					REX::INFO("builder: snap to {:.2f} {:.2f} {:.2f}, saved {:.2f} {:.2f} {:.2f}: {}", p[0], p[1], p[2], tx, ty, tz,
+						match ? "using it" : "ignoring it");
+				}
+				if (!match) {
+					return 0;
+				}
+			}
+			return g_snapEvent(a_state, a_event, a_engine, a_4);
+		}
+
+		void HookSnapEvent()
+		{
+			auto* slot = reinterpret_cast<std::uintptr_t*>(REL::ID(466620).address()) + 0x98 / 8;
+			unsigned long old = 0;
+			if (!VirtualProtect(slot, sizeof(*slot), 0x04, &old)) {
+				REX::ERROR("builder: VirtualProtect failed for the snap event");
+				return;
+			}
+			g_snapEvent = reinterpret_cast<SnapEvent_t>(*slot);
+			*slot = reinterpret_cast<std::uintptr_t>(&SnapEventHook);
+			VirtualProtect(slot, sizeof(*slot), old, &old);
+			REX::INFO("builder: hooked StateUpdatePlacement snap event (21B40E0)");
+		}
+
 		// ---- player input lock ----
 		// Every engine command runs through slot 1 of its BSService TCmd vtable. While a build runs, commands
 		// the builder did not post itself (player keys: build, cancel, rotate, other item, exit...) are dropped.
@@ -526,6 +568,7 @@ namespace OSB::Builder
 		g_update = HookCall<Update_t>(kStateUpdatePlacement, kUpdateCallOff, &UpdateHook, "placement update (21D74B0)");
 		g_foundation = HookCall<Foundation_t>(kStateUpdateFoundation, kFoundationCallOff, &FoundationHook, "foundation height (21D5CE0)");
 		g_snapSearch = HookCall<SnapSearch_t>(kUpdatePlacement, 0x6C4, &SnapSearchHook, "snap search (21D2E20)");
+		HookSnapEvent();
 		HookSlot<0>(REL::ID(466620), 0xB8 / 8, "StateUpdatePlacement commit (21B2E20)");
 		HookSlot<1>(REL::ID(466892), 0xB8 / 8, "StateUpdateAutoFoundation commit (21B2360)");
 		// a hab next to or on another hab snaps first; this state commits only with +0x188 (snap found),
