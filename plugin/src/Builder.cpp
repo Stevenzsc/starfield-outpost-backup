@@ -13,6 +13,8 @@
 #include <numbers>
 #include <thread>
 
+extern "C" __declspec(dllimport) int __stdcall VirtualProtect(void*, std::size_t, unsigned long, unsigned long*);
+
 namespace OSB::Builder
 {
 	namespace
@@ -40,6 +42,7 @@ namespace OSB::Builder
 
 		std::atomic<bool> g_forcing{ false };
 		std::atomic<bool> g_forceAll{ false };
+		std::atomic<bool> g_logAim{ false };
 		std::mutex g_targetLock;
 		float g_tx = 0, g_ty = 0, g_tz = 0, g_tyaw = 0;
 
@@ -72,6 +75,11 @@ namespace OSB::Builder
 			const auto r = g_aim(a_out, a_engine, a_f);
 			if (forcing) {
 				auto* t = reinterpret_cast<float*>(reinterpret_cast<std::uintptr_t>(a_out) + 0x30);
+				if (g_logAim.exchange(false)) {
+					const auto* m = reinterpret_cast<const float*>(a_out);
+					REX::INFO("builder: aim from game {:.2f} {:.2f} {:.2f}  rows {:.2f} {:.2f} {:.2f} | {:.2f} {:.2f} {:.2f} | {:.2f} {:.2f} {:.2f}", t[0], t[1], t[2],
+						m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
+				}
 				t[0] = x;
 				t[1] = y;
 				t[2] = z;
@@ -101,6 +109,38 @@ namespace OSB::Builder
 				}
 			}
 			return r;
+		}
+
+		// Commit handlers (state vfunc 0xB8, engine in r8) refuse unless engine+0x193 == 2: force it there.
+		using OnCommit_t = std::uintptr_t (*)(void*, void*, void* a_engine, void*);
+		OnCommit_t g_onCommit[2]{};
+
+		template <std::size_t I>
+		std::uintptr_t OnCommitHook(void* a_state, void* a_event, void* a_engine, void* a_4)
+		{
+			if (g_forcing.load() && a_engine) {
+				auto& status = *reinterpret_cast<std::uint8_t*>(reinterpret_cast<std::uintptr_t>(a_engine) + kStatus);
+				if (status != kStatusOk) {
+					REX::INFO("builder: commit with status {} forced", status);
+					status = kStatusOk;
+				}
+			}
+			return g_onCommit[I](a_state, a_event, a_engine, a_4);
+		}
+
+		template <std::size_t I>
+		void HookSlot(REL::ID a_vtbl, std::size_t a_slot, const char* a_name)
+		{
+			auto* slot = reinterpret_cast<std::uintptr_t*>(a_vtbl.address()) + a_slot;
+			unsigned long old = 0;
+			if (!VirtualProtect(slot, sizeof(*slot), 0x04, &old)) {
+				REX::ERROR("builder: VirtualProtect failed for {}", a_name);
+				return;
+			}
+			g_onCommit[I] = reinterpret_cast<OnCommit_t>(*slot);
+			*slot = reinterpret_cast<std::uintptr_t>(&OnCommitHook<I>);
+			VirtualProtect(slot, sizeof(*slot), old, &old);
+			REX::INFO("builder: hooked {}", a_name);
 		}
 
 		template <class F>
@@ -170,6 +210,7 @@ namespace OSB::Builder
 				g_tyaw = a_job.yawDeg * std::numbers::pi_v<float> / 180.0f;
 			}
 			void* before = CurrentItem();
+			g_logAim = true;
 			PostNewItem(a_entry);
 			const bool got = WaitFor([&] { return CurrentItem() && CurrentItem() != before; }, 3000);
 			if (got) {
@@ -246,6 +287,8 @@ namespace OSB::Builder
 		g_aim = HookCall<Aim_t>(kUpdatePlacement, kAimCallOff, &AimHook, "preview aim (21CE760)");
 		g_precheck = HookCall<Precheck_t>(kUpdatePlacement, kPrecheckCallOff, &PrecheckHook, "placement pre-check (21D3DD0)");
 		g_update = HookCall<Update_t>(kStateUpdatePlacement, kUpdateCallOff, &UpdateHook, "placement update (21D74B0)");
+		HookSlot<0>(REL::ID(466620), 0xB8 / 8, "StateUpdatePlacement commit (21B2E20)");
+		HookSlot<1>(REL::ID(466892), 0xB8 / 8, "StateUpdateAutoFoundation commit (21B2360)");
 	}
 
 	bool Start(std::vector<Job> a_jobs)
