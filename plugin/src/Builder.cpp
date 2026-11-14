@@ -61,6 +61,7 @@ namespace OSB::Builder
 
 		std::atomic<bool> g_running{ false };
 		std::atomic<bool> g_stop{ false };
+		std::atomic<bool> g_aborted{ false };
 		std::atomic<std::int32_t> g_done{ 0 }, g_built{ 0 }, g_failed{ 0 }, g_total{ 0 };
 
 		std::uintptr_t Engine() { return kEngine.address(); }
@@ -199,7 +200,14 @@ namespace OSB::Builder
 				if (kind != kCmdPlayerOnly && g_allow[kind].load() > 0) {
 					--g_allow[kind];
 				} else {
-					REX::INFO("builder: ignored player command {} during the build", kGuards[I].name);
+					// the player's exit or cancel key aborts the build (the script then undoes it)
+					const bool abortKey = std::string_view(kGuards[I].name) == "Exit" || std::string_view(kGuards[I].name) == "Cancel";
+					if (abortKey && !g_stop.exchange(true)) {
+						g_aborted = true;
+						REX::INFO("builder: player pressed {}: aborting", kGuards[I].name);
+					} else {
+						REX::INFO("builder: ignored player command {} during the build", kGuards[I].name);
+					}
 					return 0;
 				}
 			}
@@ -271,6 +279,9 @@ namespace OSB::Builder
 			for (int t = 0; t < a_ms; t += 50) {
 				if (a_cond()) {
 					return true;
+				}
+				if (g_aborted.load()) {
+					return false;
 				}
 				std::this_thread::sleep_for(std::chrono::milliseconds(50));
 			}
@@ -404,6 +415,7 @@ namespace OSB::Builder
 			a = 0;
 		}
 		g_stop = false;
+		g_aborted = false;
 		g_done = 0;
 		g_built = 0;
 		g_failed = 0;
@@ -414,7 +426,7 @@ namespace OSB::Builder
 
 	std::vector<std::int32_t> Progress()
 	{
-		return { g_done.load(), g_built.load(), g_failed.load(), g_total.load(), g_running.load() ? 1 : 0 };
+		return { g_done.load(), g_built.load(), g_failed.load(), g_total.load(), g_running.load() ? 1 : 0, g_aborted.load() ? 1 : 0 };
 	}
 
 	void Stop()

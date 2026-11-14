@@ -400,12 +400,32 @@ ObjectReference Function WaitForBeacon(int aiFlow, float[] akSpot)
 	return None
 EndFunction
 
+; Remove every outpost object that is not in akBefore (everything a cancelled build added, hab parts included).
+int Function UndoBuild(ObjectReference akBeacon, ObjectReference[] akBefore)
+	ObjectReference[] now = akBeacon.GetRefsLinkedToMe(OSB.GetWorkshopItemKeyword())
+	int removed = 0
+	int i = 0
+	while now && i < now.Length
+		ObjectReference r = now[i]
+		if r && r != akBeacon && (akBefore == None || akBefore.Find(r) < 0)
+			r.Disable()
+			r.Delete()
+			removed += 1
+		endif
+		i += 1
+	endwhile
+	Debug.Trace("OSB: undo removed " + removed + " objects")
+	return removed
+EndFunction
+
 ; Build the loaded restore list through the workshop engine, like the player would: opens build mode at
 ; the beacon, the plugin selects, positions and commits each object. False if it could not start
 ; (the caller then falls back to placing objects directly).
 bool Function AutoBuildAt(ObjectReference akBeacon, int aiCount)
-	Notify("building " + aiCount + " objects in build mode, please wait...")
-	; lock movement and looking during the build (the plugin also ignores build-mode keys)
+	Notify("building " + aiCount + " objects. Press the exit-build-mode key to cancel and undo.")
+	; what the outpost has now, so a cancelled build can be undone
+	ObjectReference[] before = akBeacon.GetRefsLinkedToMe(OSB.GetWorkshopItemKeyword())
+	; lock movement and looking during the build (the plugin also ignores build-mode keys, except exit = cancel)
 	InputEnableLayer lock = InputEnableLayer.Create()
 	lock.DisablePlayerControls(true, true, true, true, true, true, true, true, true, true, true)
 	akBeacon.StartWorkshop(true)
@@ -427,6 +447,12 @@ bool Function AutoBuildAt(ObjectReference akBeacon, int aiCount)
 		endif
 	endwhile
 	akBeacon.StartWorkshop(false)
+	if p && p.Length >= 6 && p[5] == 1
+		int removed = UndoBuild(akBeacon, before)
+		lock.Delete()
+		Debug.MessageBox("Restore cancelled.\n\nRemoved the " + removed + " objects it had built; the outpost is as before.")
+		return true
+	endif
 	lock.Delete()
 	if p && p.Length >= 5
 		if p[2] > 0

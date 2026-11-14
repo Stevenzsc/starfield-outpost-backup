@@ -24,7 +24,7 @@ namespace OSB::Builder
 	// Returns false if a build is already running.
 	bool Start(std::vector<Job> a_jobs);
 
-	// Progress: [done, built, failed, total, running(0/1)]
+	// Progress: [done, built, failed, total, running(0/1), aborted(0/1)]
 	std::vector<std::int32_t> Progress();
 
 	// Ask the worker to stop after the current object.
