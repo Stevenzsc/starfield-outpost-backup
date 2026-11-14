@@ -31,6 +31,7 @@
 #include <mutex>
 #include <numbers>
 #include <sstream>
+#include <unordered_set>
 
 namespace OSB
 {
@@ -76,6 +77,7 @@ namespace OSB
 		std::mutex g_lock;
 		Backup     g_pending;     // being written by BeginBackup/AddItem/EndBackup
 		bool       g_replaced = false;
+		std::size_t g_skipped = 0;   // objects left out of the current backup (not buildable)
 		Backup     g_loaded;      // read by LoadRestore
 		std::vector<std::size_t> g_restoreOrder;   // indices into g_loaded.items after filtering
 
@@ -183,6 +185,38 @@ namespace OSB
 			const double east = dLon * toRad * R * std::cos((la1 + la2) / 2 * toRad);
 			const double north = (la2 - la1) * toRad * R;
 			return std::sqrt(east * east + north * north);
+		}
+
+		// ---------- buildable objects ----------
+
+		// Form IDs that a workshop recipe (COBJ) creates. Outpost refs also include parts the game spawns for
+		// habs (acoustic spaces, occlusion, lights, triggers); those must not be placed by script (EmptyTrigger hangs).
+		const std::unordered_set<std::uint32_t>& Buildable()
+		{
+			static std::unordered_set<std::uint32_t> set;
+			static std::once_flag once;
+			std::call_once(once, [] {
+				auto* dh = RE::TESDataHandler::GetSingleton();
+				if (!dh) {
+					return;
+				}
+				auto& arr = dh->formArrays[std::to_underlying(RE::FormType::kCOBJ)];
+				for (auto& f : arr.formArray) {
+					auto* cobj = f ? f->As<RE::BGSConstructibleObject>() : nullptr;
+					if (cobj && cobj->createdObject) {
+						set.insert(cobj->createdObject->GetFormID());
+					}
+				}
+				REX::INFO("buildable: {} objects have a workshop recipe", set.size());
+			});
+			return set;
+		}
+
+		// True if the base can be built in a workshop (or the recipe list is unavailable).
+		bool IsBuildable(RE::TESForm* a_base)
+		{
+			const auto& set = Buildable();
+			return set.empty() || (a_base && set.contains(a_base->GetFormID()));
 		}
 
 		// ---------- load order: runtime form id <-> plugin + local id ----------
@@ -469,7 +503,17 @@ namespace OSB
 			g_busy = false;
 		}
 
-		bool BeginBackup(std::monostate, RE::TESObjectREFR* a_beacon, float a_bx, float a_by, float a_bz, float a_byaw)
+		std::string LocationName(RE::BGSLocation* a_loc)
+		{
+			if (!a_loc) {
+				return {};
+			}
+			const char* n = static_cast<RE::TESFullName*>(a_loc)->GetFullName();
+			return n && *n ? Clean(n) : std::string();
+		}
+
+		// a_planetLoc: the planet's location (planet name); a_hereLoc: the player's current location (outpost name).
+		bool BeginBackup(std::monostate, RE::TESObjectREFR* a_beacon, RE::BGSLocation* a_planetLoc, RE::BGSLocation* a_hereLoc, float a_bx, float a_by, float a_bz, float a_byaw)
 		{
 			std::scoped_lock l(g_lock);
 			const auto s = ReadPlanet();
@@ -483,12 +527,20 @@ namespace OSB
 			g_pending.lat = s.lat;
 			g_pending.lon = s.lon;
 			g_pending.bx = a_bx; g_pending.by = a_by; g_pending.bz = a_bz; g_pending.byaw = a_byaw;
-			if (auto* ref = a_beacon) {
-				if (const char* n = ref->GetDisplayFullName(); n && *n) {
+			g_pending.planetName = LocationName(a_planetLoc);
+			if (g_pending.planetName.empty()) {
+				g_pending.planetName = FormName(RE::TESForm::LookupByID(s.planet));
+			}
+			g_pending.name = LocationName(a_hereLoc);
+			if (g_pending.name == g_pending.planetName) {
+				g_pending.name.clear();
+			}
+			if (g_pending.name.empty() && a_beacon) {
+				if (const char* n = a_beacon->GetDisplayFullName(); n && *n) {
 					g_pending.name = Clean(n);
 				}
 			}
-			g_pending.planetName = FormName(RE::TESForm::LookupByID(s.planet));
+			g_skipped = 0;
 			return true;
 		}
 
@@ -508,6 +560,10 @@ namespace OSB
 				return false;
 			}
 			std::scoped_lock l(g_lock);
+			if (!IsBuildable(a_base)) {
+				++g_skipped;   // part spawned by a hab or other object; comes back with its parent
+				return false;
+			}
 			g_pending.items.push_back({ plugin, local, x, y, z, ax, ay, az, scale, a_pack });
 			return true;
 		}
@@ -549,7 +605,7 @@ namespace OSB
 				return -1;
 			}
 			WriteText(Folder() / "latest.osb", text);
-			REX::INFO("backup: {} objects, '{}' on {} ({:08X}), center {:.6f} {:.6f} -> {}{}", g_pending.items.size(), g_pending.name,
+			REX::INFO("backup: {} objects ({} parts skipped), '{}' on {} ({:08X}), center {:.6f} {:.6f} -> {}{}", g_pending.items.size(), g_skipped, g_pending.name,
 				g_pending.planetName, g_pending.planet, g_pending.lat, g_pending.lon, target.string(), g_replaced ? " (replaced)" : "");
 			return std::int32_t(g_pending.items.size());
 		}
@@ -782,10 +838,15 @@ namespace OSB
 				it.y += north;
 			}
 
+			std::size_t notBuildable = 0;
 			struct Group { float x, y, z; bool pack; };
 			std::vector<Group> groups;
 			for (std::size_t i = 0; i < g_loaded.items.size(); ++i) {
 				const auto& it = g_loaded.items[i];
+				if (auto* form = FindForm(it.plugin, it.local); form && !IsBuildable(form)) {
+					++notBuildable;   // hab part (light, trigger, sound space...): its parent spawns it
+					continue;
+				}
 				const Group* parent = nullptr;
 				for (const auto& g : groups) {
 					if (std::abs(g.x - it.x) < 0.01f && std::abs(g.y - it.y) < 0.01f && std::abs(g.z - it.z) < 0.2f) {
@@ -801,6 +862,7 @@ namespace OSB
 				}
 				g_restoreOrder.push_back(i);
 			}
+			REX::INFO("restore: {} of {} objects to place ({} hab parts left to their parents)", g_restoreOrder.size(), g_loaded.items.size(), notBuildable);
 			return std::int32_t(g_restoreOrder.size());
 		}
 

@@ -166,7 +166,13 @@ Function DoBackup()
 		Notify("stand inside the outpost you want to back up.")
 		return
 	endif
-	if !OSB_Native.BeginBackup(beacon, beacon.GetPositionX(), beacon.GetPositionY(), beacon.GetPositionZ(), beacon.GetAngleZ())
+	Actor player = Game.GetPlayer()
+	Location planetLoc = None
+	Planet p = player.GetCurrentPlanet()
+	if p
+		planetLoc = p.GetLocation()
+	endif
+	if !OSB_Native.BeginBackup(beacon, planetLoc, player.GetCurrentLocation(), beacon.GetPositionX(), beacon.GetPositionY(), beacon.GetPositionZ(), beacon.GetAngleZ())
 		Notify("only works on a planet surface.")
 		return
 	endif
@@ -332,6 +338,9 @@ Function RestoreAt(ObjectReference akBeacon, float[] akSpot)
 		if base && t && t.Length >= 7
 			if OSB.PlaceBase(base, t[0], t[1], t[2], t[3], t[4], t[5], t[6])
 				placed += 1
+			endif
+			if placed % 50 == 0
+				Notify("restored " + placed + " of " + n + "...")
 			endif
 		else
 			missing += 1

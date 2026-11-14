@@ -9,8 +9,10 @@ bool Function TryLock() global native
 Function Unlock() global native
 
 ; ---- backup ----
-; Start a backup at the current landing zone; false if not on a planet surface. akBeacon gives the outpost name.
-bool Function BeginBackup(ObjectReference akBeacon, float afBeaconX, float afBeaconY, float afBeaconZ, float afBeaconYaw) global native
+; Start a backup at the current landing zone; false if not on a planet surface.
+; akPlanetLoc and akHereLoc (the player's current location) give the planet and outpost names.
+; Objects without a workshop recipe (parts the game spawns for habs) are left out.
+bool Function BeginBackup(ObjectReference akBeacon, Location akPlanetLoc, Location akHereLoc, float afBeaconX, float afBeaconY, float afBeaconZ, float afBeaconYaw) global native
 ; Add one object (plugin + local ID are worked out by the plugin). afPackIn: base is a PackIn.
 bool Function AddItem(Form akBase, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale, bool abPackIn) global native
 ; Write the backup file; returns the number of objects, 0 if there was nothing to save, -1 on failure.
