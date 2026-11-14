@@ -219,7 +219,7 @@ namespace OSB
 						b.lon = num(2);
 					} else if (t[0] == "beacon" && t.size() >= 5) {
 						b.bx = float(num(1)); b.by = float(num(2)); b.bz = float(num(3)); b.byaw = float(num(4));
-					} else if (t[0] == "item" && t.size() >= 12) {
+					} else if (t[0] == "item" && t.size() >= 11) {
 						Item it;
 						it.plugin = t[1];
 						it.local = std::stoul(t[2], nullptr, 16);
