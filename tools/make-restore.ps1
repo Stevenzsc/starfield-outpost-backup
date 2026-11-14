@@ -12,7 +12,8 @@ param(
   [ValidateSet("Relative", "Absolute")][string]$Mode = "Relative",
   [string]$Name = "",
   [string]$Game = "C:\Program Files (x86)\Steam\steamapps\common\Starfield",
-  [Nullable[double]]$BeaconYaw = $null
+  [Nullable[double]]$BeaconYaw = $null,
+  [switch]$AttachParts   # experimental: re-attach co-located parts with OSB.RFA (breaks scrapping in tests)
 )
 $inv = [Globalization.CultureInfo]::InvariantCulture
 function Num([string]$s) { [double]::Parse($s, $inv) }
@@ -85,9 +86,12 @@ foreach ($l in $lines[($begin + 1)..($end - 1)]) {
   $parent = $groups | Where-Object { [Math]::Abs($_.x - $px) -lt 0.01 -and [Math]::Abs($_.y - $py) -lt 0.01 -and [Math]::Abs($_.z - $pz) -lt 0.2 } | Select-Object -First 1
   if (-not $parent -and $plugin) { $groups += @{ x = $px; y = $py; z = $pz; plugin = $plugin; local = $local } }
   if ($Mode -eq "Absolute") {
-    if ($parent -and $plugin) {
+    $plain = (Num $v[3]) -eq 0 -and (Num $v[4]) -eq 0 -and (Num $v[6]) -eq 1
+    # Off by default: in game, AttachTo made the restored object impossible to select or scrap.
+    if ($AttachParts -and $parent -and $plugin -and $plain) {
       $attached++
-      $cmds.Add("cgf `"OSB.RFA`" $ref $($v -join ' ') `"$($parent.plugin)`" $($parent.local) $(Fmt $parent.x) $(Fmt $parent.y) $(Fmt $parent.z)")
+      # 8 parameters only: cgf did not run a longer version
+      $cmds.Add("cgf `"OSB.RFA`" $ref $($v[0]) $($v[1]) $($v[2]) $($v[5]) `"$($parent.plugin)`" $($parent.local)")
     } else {
       $cmds.Add("cgf `"OSB.R$fn`" $ref $($v -join ' ')")
     }

@@ -151,22 +151,48 @@ Function RRF(string asPlugin, int aiLocalID, float afLX, float afLY, float afLZ,
 	PlaceBase(base, beacon.GetPositionX() + afLX * c + afLY * s, beacon.GetPositionY() - afLX * s + afLY * c, beacon.GetPositionZ() + afLZ, afAX, afAY, afRelAZ + yaw, afScale)
 EndFunction
 
-; A part of a multi-part object: placed like RF, then attached to its parent, which was placed by the
-; previous line at exactly (afPX, afPY, afPZ). Found by base + position, since cgf calls share no state.
-Function RFA(string asPlugin, int aiLocalID, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale, string asParentPlugin, int aiParentLocalID, float afPX, float afPY, float afPZ) global
+; A part of a multi-part object: placed like RF, then attached to its parent, which an earlier line placed
+; at (almost) the same spot. Found by base + position, since cgf calls share no state.
+; Kept to 8 parameters: cgf did not run a 14-parameter version at all. Tilt is 0 and scale 1 here
+; (make-restore.ps1 uses RF for parts that are tilted or scaled).
+Function RFA(string asPlugin, int aiLocalID, float afX, float afY, float afZ, float afAZ, string asParentPlugin, int aiParentLocalID) global
+	Debug.Trace("OSB: RFA start " + asPlugin + " " + aiLocalID + " owner " + asParentPlugin + " " + aiParentLocalID)
 	Form base = Game.GetFormFromFile(aiLocalID, asPlugin)
-	Form parentBase = Game.GetFormFromFile(aiParentLocalID, asParentPlugin)
-	if base == None || parentBase == None
-		Debug.Trace("OSB: RFA base not found " + asPlugin + " " + aiLocalID + " / parent " + asParentPlugin + " " + aiParentLocalID)
+	Form ownerBase = Game.GetFormFromFile(aiParentLocalID, asParentPlugin)
+	if base == None || ownerBase == None
+		Debug.Trace("OSB: RFA base not found " + asPlugin + " " + aiLocalID + " / owner " + asParentPlugin + " " + aiParentLocalID)
 		return
 	endif
-	ObjectReference child = PlaceBase(base, afX, afY, afZ, afAX, afAY, afAZ, afScale)
-	ObjectReference parent = Game.FindClosestReferenceOfType(parentBase, afPX, afPY, afPZ, 0.05)
-	if child && parent
-		child.AttachTo(parent)
-		Debug.Trace("OSB: RFA attached " + child + " to " + parent)
+	ObjectReference child = PlaceBase(base, afX, afY, afZ, 0.0, 0.0, afAZ, 1.0)
+	if child == None
+		return
+	endif
+	; bat runs lines in parallel, so the owner may not exist yet; a scrapped old owner may still be
+	; found at the same spot. Wait for a live owner that belongs to this outpost.
+	ObjectReference beacon = FindBeacon()
+	Keyword kw = GetWorkshopItemKeyword()
+	ObjectReference owner = None
+	int tries = 0
+	while owner == None && tries < 50
+		ObjectReference[] cands = child.FindAllReferencesOfType(ownerBase, 0.5)
+		int i = 0
+		while cands && i < cands.Length && owner == None
+			ObjectReference c = cands[i]
+			if c && c != child && !c.IsDisabled() && c.GetLinkedRef(kw) == beacon
+				owner = c
+			endif
+			i += 1
+		endwhile
+		if owner == None
+			Utility.Wait(0.1)
+			tries += 1
+		endif
+	endwhile
+	if child && owner
+		child.AttachTo(owner)
+		Debug.Trace("OSB: RFA attached " + child + " to " + owner)
 	else
-		Debug.Trace("OSB: RFA could not attach child=" + child + " parent=" + parent)
+		Debug.Trace("OSB: RFA could not attach child=" + child + " owner=" + owner)
 	endif
 EndFunction
 
