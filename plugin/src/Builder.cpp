@@ -33,6 +33,8 @@ namespace OSB::Builder
 		constexpr std::ptrdiff_t kPrecheckCallOff = 0x32D;  // call 21D3DD0 (cost/limit status, 0 = ok)
 		constexpr REL::ID kStateUpdatePlacement{ 121280 };  // +0x21B41F0 (StateUpdatePlacement vfunc 0x130)
 		constexpr std::ptrdiff_t kUpdateCallOff = 0x57;     // call 21D74B0
+		constexpr REL::ID kStateUpdateFoundation{ 121270 };  // +0x21B2470 (StateUpdateAutoFoundation vfunc 0x130)
+		constexpr std::ptrdiff_t kFoundationCallOff = 0x52;  // call 21D5CE0 (per-frame foundation height)
 
 		// engine fields
 		constexpr std::ptrdiff_t kItem = 0x268;      // shared_ptr<WorkshopItem> current preview
@@ -44,6 +46,7 @@ namespace OSB::Builder
 		std::atomic<bool> g_forcing{ false };
 		std::atomic<bool> g_forceAll{ false };
 		std::atomic<bool> g_logAim{ false };
+		std::atomic<bool> g_logFoundation{ false };
 		std::atomic<std::uint32_t> g_placed{ 0 };    // Workshop::ItemPlacedEvent count
 		constexpr float kSmallObject = 20.0f;        // m^2 footprint: furniture and decorations
 
@@ -128,6 +131,37 @@ namespace OSB::Builder
 					status = kStatusOk;
 				}
 			}
+			return r;
+		}
+
+		// Auto-foundation state (habs after the first commit): the player sets the height with the camera pitch,
+		// then commits again. 21D5CE0 uses the fixed height at engine+0x19C when engine+0x198 is set (else the
+		// pitch), clamps it to [ground +0x1A0, max +0x1A4] and writes the preview z (+0x140).
+		using Foundation_t = std::uintptr_t (*)(void* a_engine, std::uintptr_t a_2);
+		Foundation_t g_foundation = nullptr;
+
+		std::uintptr_t FoundationHook(void* a_engine, std::uintptr_t a_2)
+		{
+			if (!g_forcing.load()) {
+				return g_foundation(a_engine, a_2);
+			}
+			const auto e = reinterpret_cast<std::uintptr_t>(a_engine);
+			auto& fixed = *reinterpret_cast<std::uint8_t*>(e + 0x198);
+			auto& height = *reinterpret_cast<float*>(e + 0x19C);
+			const auto oldFixed = fixed;
+			const auto oldHeight = height;
+			fixed = 1;
+			{
+				std::scoped_lock l(g_targetLock);
+				height = g_tz;
+			}
+			const auto r = g_foundation(a_engine, a_2);
+			if (g_logFoundation.exchange(false)) {
+				REX::INFO("builder: foundation height {:.2f} -> preview z {:.2f} (allowed {:.2f}..{:.2f})", height,
+					*reinterpret_cast<float*>(e + 0x140), *reinterpret_cast<float*>(e + 0x1A0), *reinterpret_cast<float*>(e + 0x1A4));
+			}
+			fixed = oldFixed;
+			height = oldHeight;
 			return r;
 		}
 
@@ -306,6 +340,7 @@ namespace OSB::Builder
 			}
 			void* before = CurrentItem();
 			g_logAim = true;
+			g_logFoundation = true;
 			PostNewItem(a_entry, a_job.formID);
 			const bool got = WaitFor([&] { return CurrentItem() && CurrentItem() != before; }, 3000);
 			if (got) {
@@ -393,6 +428,7 @@ namespace OSB::Builder
 		g_aim = HookCall<Aim_t>(kUpdatePlacement, kAimCallOff, &AimHook, "preview aim (21CE760)");
 		g_precheck = HookCall<Precheck_t>(kUpdatePlacement, kPrecheckCallOff, &PrecheckHook, "placement pre-check (21D3DD0)");
 		g_update = HookCall<Update_t>(kStateUpdatePlacement, kUpdateCallOff, &UpdateHook, "placement update (21D74B0)");
+		g_foundation = HookCall<Foundation_t>(kStateUpdateFoundation, kFoundationCallOff, &FoundationHook, "foundation height (21D5CE0)");
 		HookSlot<0>(REL::ID(466620), 0xB8 / 8, "StateUpdatePlacement commit (21B2E20)");
 		HookSlot<1>(REL::ID(466892), 0xB8 / 8, "StateUpdateAutoFoundation commit (21B2360)");
 		[]<std::size_t... I>(std::index_sequence<I...>) { (HookCmd<I>(), ...); }(std::make_index_sequence<kGuardCount>{});
