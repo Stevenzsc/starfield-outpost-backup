@@ -76,7 +76,7 @@ Function Backup(int aiBeaconID) global
 	if refs
 		total = refs.Length
 	endif
-	Debug.TraceUser(log, "OSB-BEGIN beacon=" + beacon + " pos=(" + beacon.GetPositionX() + "," + beacon.GetPositionY() + "," + beacon.GetPositionZ() + ") linked=" + total)
+	Debug.TraceUser(log, "OSB-BEGIN beacon=" + beacon + " pos=(" + beacon.GetPositionX() + "," + beacon.GetPositionY() + "," + beacon.GetPositionZ() + ") yaw=" + beacon.GetAngleZ() + " linked=" + total)
 	float bx = beacon.GetPositionX()
 	float by = beacon.GetPositionY()
 	float bz = beacon.GetPositionZ()
@@ -95,7 +95,12 @@ Function Backup(int aiBeaconID) global
 				Debug.Trace("OSB: Backup skip (on beacon) ref=" + r + " base=" + base)
 			else
 				; base prints as "[Form < (0006AC92)>]"; make-restore.ps1 parses the hex ID
-				string line = "OSB-ITEM " + base + " " + r.GetPositionX() + " " + r.GetPositionY() + " " + r.GetPositionZ() + " " + r.GetAngleX() + " " + r.GetAngleY() + " " + r.GetAngleZ() + " " + r.GetScale()
+				; last field: 1 if the base is a PackIn (its parts spawn by themselves when it is placed)
+				int packFlag = 0
+				if base as PackIn
+					packFlag = 1
+				endif
+				string line = "OSB-ITEM " + base + " " + r.GetPositionX() + " " + r.GetPositionY() + " " + r.GetPositionZ() + " " + r.GetAngleX() + " " + r.GetAngleY() + " " + r.GetAngleZ() + " " + r.GetScale() + " " + packFlag
 				Debug.TraceUser(log, line)
 				Debug.Trace("OSB: Backup keep ref=" + r + " base=" + base)
 				saved += 1
@@ -109,7 +114,7 @@ EndFunction
 
 ; ---------- restore ----------
 
-; One object. Called once per line of OSB_Restore.txt.
+; One object by load-order form ID (old backups). Called once per line of OSB_Restore.txt.
 Function R(int aiBaseID, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale) global
 	Form base = Game.GetForm(aiBaseID)
 	if base == None
@@ -117,18 +122,98 @@ Function R(int aiBaseID, float afX, float afY, float afZ, float afAX, float afAY
 		Debug.Notification("OSB: base form missing " + aiBaseID)
 		return
 	endif
+	PlaceBase(base, afX, afY, afZ, afAX, afAY, afAZ, afScale)
+EndFunction
+
+; One object by plugin file name + local form ID: independent of the load order.
+Function RF(string asPlugin, int aiLocalID, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale) global
+	Form base = Game.GetFormFromFile(aiLocalID, asPlugin)
+	if base == None
+		Debug.Trace("OSB: RF base not found " + asPlugin + " " + aiLocalID + " (plugin not installed?)")
+		Debug.Notification("OSB: missing " + asPlugin + " " + aiLocalID)
+		return
+	endif
+	PlaceBase(base, afX, afY, afZ, afAX, afAY, afAZ, afScale)
+EndFunction
+
+; Relative-mode version of RF (see RR).
+Function RRF(string asPlugin, int aiLocalID, float afLX, float afLY, float afLZ, float afAX, float afAY, float afRelAZ, float afScale) global
+	Form base = Game.GetFormFromFile(aiLocalID, asPlugin)
+	if base == None
+		Debug.Trace("OSB: RRF base not found " + asPlugin + " " + aiLocalID + " (plugin not installed?)")
+		Debug.Notification("OSB: missing " + asPlugin + " " + aiLocalID)
+		return
+	endif
+	ObjectReference beacon = FindBeacon()
+	if beacon == None
+		Debug.Notification("OSB: no outpost beacon within 300 m")
+		Debug.Trace("OSB: RRF no beacon")
+		return
+	endif
+	float yaw = beacon.GetAngleZ()
+	float c = Math.cos(yaw)
+	float s = Math.sin(yaw)
+	PlaceBase(base, beacon.GetPositionX() + afLX * c + afLY * s, beacon.GetPositionY() - afLX * s + afLY * c, beacon.GetPositionZ() + afLZ, afAX, afAY, afRelAZ + yaw, afScale)
+EndFunction
+
+; A part of a multi-part object: placed like RF, then attached to its parent, which an earlier line placed
+; at (almost) the same spot. Found by base + position, since cgf calls share no state.
+; Kept to 8 parameters: cgf did not run a 14-parameter version at all. Tilt is 0 and scale 1 here
+; (make-restore.ps1 uses RF for parts that are tilted or scaled).
+Function RFA(string asPlugin, int aiLocalID, float afX, float afY, float afZ, float afAZ, string asParentPlugin, int aiParentLocalID) global
+	Debug.Trace("OSB: RFA start " + asPlugin + " " + aiLocalID + " owner " + asParentPlugin + " " + aiParentLocalID)
+	Form base = Game.GetFormFromFile(aiLocalID, asPlugin)
+	Form ownerBase = Game.GetFormFromFile(aiParentLocalID, asParentPlugin)
+	if base == None || ownerBase == None
+		Debug.Trace("OSB: RFA base not found " + asPlugin + " " + aiLocalID + " / owner " + asParentPlugin + " " + aiParentLocalID)
+		return
+	endif
+	ObjectReference child = PlaceBase(base, afX, afY, afZ, 0.0, 0.0, afAZ, 1.0)
+	if child == None
+		return
+	endif
+	; bat runs lines in parallel, so the owner may not exist yet; a scrapped old owner may still be
+	; found at the same spot. Wait for a live owner that belongs to this outpost.
+	ObjectReference beacon = FindBeacon()
+	Keyword kw = GetWorkshopItemKeyword()
+	ObjectReference owner = None
+	int tries = 0
+	while owner == None && tries < 50
+		ObjectReference[] cands = child.FindAllReferencesOfType(ownerBase, 0.5)
+		int i = 0
+		while cands && i < cands.Length && owner == None
+			ObjectReference c = cands[i]
+			if c && c != child && !c.IsDisabled() && c.GetLinkedRef(kw) == beacon
+				owner = c
+			endif
+			i += 1
+		endwhile
+		if owner == None
+			Utility.Wait(0.1)
+			tries += 1
+		endif
+	endwhile
+	if child && owner
+		child.AttachTo(owner)
+		Debug.Trace("OSB: RFA attached " + child + " to " + owner)
+	else
+		Debug.Trace("OSB: RFA could not attach child=" + child + " owner=" + owner)
+	endif
+EndFunction
+
+ObjectReference Function PlaceBase(Form base, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale) global
 	ObjectReference beacon = FindBeacon()
 	Keyword kw = GetWorkshopItemKeyword()
 	if beacon == None || kw == None
 		Debug.Notification("OSB: no outpost beacon within 300 m")
 		Debug.Trace("OSB: R no beacon / keyword")
-		return
+		return None
 	endif
 	; spawn disabled, move into place, link to the outpost, then enable so 3D loads at the final spot
 	ObjectReference newRef = beacon.PlaceAtMe(base, 1, true, true, false)
 	if newRef == None
-		Debug.Trace("OSB: R PlaceAtMe failed base=" + base)
-		return
+		Debug.Trace("OSB: PlaceAtMe failed base=" + base)
+		return None
 	endif
 	newRef.SetPosition(afX, afY, afZ)
 	newRef.SetAngle(afAX, afAY, afAZ)
@@ -137,7 +222,148 @@ Function R(int aiBaseID, float afX, float afY, float afZ, float afAX, float afAY
 	endif
 	newRef.SetLinkedRef(beacon, kw)
 	newRef.Enable(false)
-	Debug.Trace("OSB: R new=" + newRef + " base=" + base + " workshop=" + newRef.GetWorkshop() + " inBuildableArea=" + newRef.IsWithinBuildableArea(beacon))
+	Debug.Trace("OSB: placed new=" + newRef + " base=" + base + " workshop=" + newRef.GetWorkshop() + " inBuildableArea=" + newRef.IsWithinBuildableArea(beacon))
+	return newRef
+EndFunction
+
+; One object, placed relative to the beacon of the outpost the player is in.
+; afLX/afLY/afLZ: offset in the old beacon's local frame (meters); afRelAZ: heading relative to the old beacon.
+; make-restore.ps1 computes these, so the layout follows the new beacon's position and heading.
+Function RR(int aiBaseID, float afLX, float afLY, float afLZ, float afAX, float afAY, float afRelAZ, float afScale) global
+	ObjectReference beacon = FindBeacon()
+	if beacon == None
+		Debug.Notification("OSB: no outpost beacon within 300 m")
+		Debug.Trace("OSB: RR no beacon")
+		return
+	endif
+	float yaw = beacon.GetAngleZ()
+	float c = Math.cos(yaw)   ; Papyrus Math.cos/sin take degrees
+	float s = Math.sin(yaw)
+	; heading is clockwise from +Y: local (x, y) -> world (x*c + y*s, -x*s + y*c)
+	float wx = beacon.GetPositionX() + afLX * c + afLY * s
+	float wy = beacon.GetPositionY() - afLX * s + afLY * c
+	float wz = beacon.GetPositionZ() + afLZ
+	R(aiBaseID, wx, wy, wz, afAX, afAY, afRelAZ + yaw, afScale)
+EndFunction
+
+; ---------- diagnostics ----------
+
+; How are multi-part objects grouped? For every outpost ref: base type and its links.
+; Never calls GetFormID (hangs on some forms).
+Function Inspect(int aiBeaconID = 0) global
+	ObjectReference beacon
+	if aiBeaconID == 0
+		beacon = FindBeacon()   ; the outpost you are standing in
+	else
+		beacon = GetRef(aiBeaconID)
+	endif
+	Keyword kw = GetWorkshopItemKeyword()
+	if beacon == None || kw == None
+		return
+	endif
+	Keyword kStacked = Game.GetFormFromFile(0x001C5EDD, "Starfield.esm") as Keyword   ; WorkshopStackedItemParentKEYWORD
+	Keyword kPrim = Game.GetFormFromFile(0x000B91E6, "Starfield.esm") as Keyword      ; WorkshopLinkedPrimitive
+	Keyword kCenter = Game.GetFormFromFile(0x00038C0B, "Starfield.esm") as Keyword    ; WorkshopLinkCenter
+	ObjectReference[] refs = beacon.GetRefsLinkedToMe(kw)
+	int i = 0
+	while refs && i < refs.Length
+		ObjectReference r = refs[i]
+		Form base = r.GetBaseObject()
+		bool isPack = (base as PackIn) != None
+		ObjectReference[] toMe = r.GetRefsLinkedToMe(None)
+		int nToMe = 0
+		if toMe
+			nToMe = toMe.Length
+		endif
+		Debug.Trace("OSB: Inspect #" + i + " ref=" + r + " base=" + base + " packin=" + isPack + " pos=(" + r.GetPositionX() + "," + r.GetPositionY() + "," + r.GetPositionZ() + ") link(None)=" + r.GetLinkedRef(None) + " link(Stacked)=" + r.GetLinkedRef(kStacked) + " link(Prim)=" + r.GetLinkedRef(kPrim) + " link(Center)=" + r.GetLinkedRef(kCenter) + " linkedToMe(None)=" + nToMe)
+		i += 1
+	endwhile
+	Debug.Notification("OSB: inspected " + i + " refs, see Papyrus log")
+EndFunction
+
+; ---------- guidance ----------
+; Local coordinates are measured from the center of the current landing zone, so they only
+; match the backup when you land at the same spot (e.g. same latitude/longitude).
+
+; Print planet, landing-zone position of the player and of the nearest outpost beacon.
+Function Where() global
+	; each part is traced on its own: some native calls can hang (see GetFormID), so a hang
+	; in a later part must not hide the earlier results
+	Actor player = Game.GetPlayer()
+	Debug.Trace("OSB: Where player=(" + player.GetPositionX() + "," + player.GetPositionY() + "," + player.GetPositionZ() + ") heading=" + player.GetAngleZ())
+	Debug.Notification("OSB: you are at " + Math.Floor(player.GetPositionX()) + ", " + Math.Floor(player.GetPositionY()) + ", " + Math.Floor(player.GetPositionZ()))
+	ObjectReference beacon = FindBeacon()
+	if beacon
+		Debug.Trace("OSB: Where beacon=" + beacon + " pos=(" + beacon.GetPositionX() + "," + beacon.GetPositionY() + "," + beacon.GetPositionZ() + ") yaw=" + beacon.GetAngleZ())
+	endif
+	Debug.Trace("OSB: Where getting ship")
+	ObjectReference ship = Game.GetPlayerHomeSpaceShip()
+	Debug.Trace("OSB: Where ship=" + ship)
+	if ship
+		Debug.Trace("OSB: Where shippos=(" + ship.GetPositionX() + "," + ship.GetPositionY() + "," + ship.GetPositionZ() + ")")
+		Debug.Notification("OSB: ship at " + Math.Floor(ship.GetPositionX()) + ", " + Math.Floor(ship.GetPositionY()))
+	endif
+EndFunction
+
+; atan2 in degrees, heading convention: 0 = +Y, clockwise positive
+float Function HeadingTo(float afDX, float afDY) global
+	if afDX == 0.0 && afDY == 0.0
+		return 0.0
+	endif
+	float a
+	if Math.abs(afDY) >= Math.abs(afDX)
+		a = Math.atan(afDX / afDY)
+		if afDY < 0.0
+			a += 180.0
+		endif
+	else
+		a = 90.0 - Math.atan(afDY / afDX)
+		if afDX < 0.0
+			a += 180.0
+		endif
+	endif
+	while a > 180.0
+		a -= 360.0
+	endwhile
+	while a <= -180.0
+		a += 360.0
+	endwhile
+	return a
+EndFunction
+
+; Walk the player to a landing-zone position (the old beacon spot). Updates every 2 s for up to
+; aiSeconds (default 180), stops when within 1.5 m. Notification text is ASCII on purpose.
+Function Guide(float afX, float afY, float afZ, int aiSeconds = 180) global
+	Actor player = Game.GetPlayer()
+	int elapsed = 0
+	while elapsed < aiSeconds
+		float dx = afX - player.GetPositionX()
+		float dy = afY - player.GetPositionY()
+		float dz = afZ - player.GetPositionZ()
+		float dist = Math.sqrt(dx * dx + dy * dy)
+		if dist < 1.5
+			Debug.Notification("OSB: you are on the old beacon spot (height " + Math.Floor(dz * 10.0) / 10.0 + " m). Place the beacon here.")
+			Debug.Trace("OSB: Guide arrived dz=" + dz)
+			return
+		endif
+		float turn = HeadingTo(dx, dy) - player.GetAngleZ()
+		while turn > 180.0
+			turn -= 360.0
+		endwhile
+		while turn <= -180.0
+			turn += 360.0
+		endwhile
+		string dir = "ahead"
+		if turn > 20.0
+			dir = "turn right " + Math.Floor(turn) + " deg"
+		elseif turn < -20.0
+			dir = "turn left " + Math.Floor(-turn) + " deg"
+		endif
+		Debug.Notification("OSB: old beacon " + Math.Floor(dist) + " m, " + dir + ", height " + Math.Floor(dz) + " m")
+		Utility.Wait(2.0)
+		elapsed += 2
+	endwhile
+	Debug.Notification("OSB: guide timed out, run bat OSB_Guide again")
 EndFunction
 
 Function Done(int aiExpected) global

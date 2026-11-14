@@ -2,6 +2,7 @@
 
 > 本文记录了与 Claude Code 的讨论与测试过程，以及最终结论。
 > 2026-11-14 更新：找到 `WorkshopItemKeyword` 链接方案，纯 Papyrus 原型已在游戏中完成“备份 → 拆光 → 恢复”全流程。
+> 2026-11-14 再更新：逆向找到降落区经纬度与星图降落函数，SFSE 插件 OSBLanding 实现精确降落；**跨存档、同一星球同一位置恢复哨站已在游戏中验证成功**（位置、高度均正确）。
 
 ## 总结
 
@@ -9,8 +10,42 @@
 |---|---|
 | 目标 | 备份哨站，并在**同一位置**原地恢复；支持跨存档 |
 | 纯 Papyrus | ✅ **可行（原型已验证）**：`GetRefsLinkedToMe(WorkshopItemKeyword)` 能列全哨站物件；`PlaceAtMe` + `SetLinkedRef(信标, WorkshopItemKeyword)` + `Enable()` 能把新物件挂回哨站 |
-| 跨存档 | 不需要 SFSE：备份写入 Papyrus 用户日志，PowerShell 转成控制台批处理文件，用 `bat` 恢复。跨存档坐标是否一致**尚未验证** |
-| SFSE C++ | 目前不需要 |
+| 跨存档、同一位置 | ✅ **已验证**：备份时记录降落区中心经纬度（读游戏内存）；新存档用 OSBLanding 插件精确降落到同一中心，坐标系与原存档一致，用绝对坐标恢复 |
+| SFSE C++ | 只用于精确降落（`plugin/`，GitHub Actions 编译） |
+
+### 跨存档原位恢复流程（已验证）
+
+1. **原存档**：站在哨站旁，`cgf "OSB.Backup" <信标ID>`，等提示；游戏不关，运行 `tools\make-restore.ps1 -Mode Absolute`（会调用 `sfgps.exe` 记下降落区中心经纬度、星球，写入 `OSB_Restore.json`）。
+2. 安装 `OSBLanding.dll` 到 `Data\SFSE\Plugins`（用 `sfse_loader.exe` 启动）。
+3. **新存档**：运行 `tools\arm-landing.ps1`（写 `OSB_LandTarget.txt` 和 `OSB_Guide.txt`）。到同一星球轨道，星图上随便点一个地方降落 → 插件把降落位置替换为原降落区中心（一次性，用后文件改名为 `.used.txt`）。
+4. `bat OSB_Guide` 走到原信标位置，放信标；`bat OSB_Restore` 恢复。
+
+### 逆向结果（游戏 1.16.244）
+
+| 项目 | 位置 |
+|---|---|
+| `BGSPlanet::Manager`（静态对象） | Address Library ID **945580**（CommonLibSF 单例 ID 937609 指向它） |
+| 当前星球 FormID | Manager `+0x80`（uint32） |
+| 降落区中心经度 / 纬度 | Manager `+0x98` / `+0xA0`（double，弧度）；`+0xB0`、`+0x1A8` 各有一份副本 |
+| 星球半径 | Manager `+0x100`（float，km） |
+| `SetLandingSite` | ID **51740**；参数 r9 = 降落点结构，`+0` 经度、`+8` 纬度（弧度） |
+| 调用方 | `LandAtLatLon` ID 51739（**读档时**恢复降落区）；**星图点选降落** ID 97897 `+0x1EB`；ID 97898 `+0x2D2`；`LandAtRef` ID 97899 `+0x170` |
+| 起飞时复位 | ID 51746 |
+
+- 局部坐标（`GetPositionX/Y/Z`）单位是米；朝向 0° = 北，顺时针；+Y 北、+X 东。
+- 在**已探索降落区附近**降落时，游戏会沿用旧坐标系并把降落点挪开约 1.2 km，所以同一存档里测不出精确效果；在未探索的位置降落，降落中心与目标逐位一致。
+- 相对模式以新信标为基准，新信标高度不同时物件整体偏高/偏低；精确降落后应使用绝对模式。
+- 不可用的方法：硬件写断点（降落时游戏崩溃，写入线程对调试器隐藏）；在内存里按经纬度/方向向量搜索星图点选目标（不以这些形式存放）；读取 Papyrus 里飞船坐标（`GetPlayerHomeSpaceShip().GetPositionX()` 会卡住）。
+
+### 工具
+
+| 文件 | 用途 |
+|---|---|
+| `tools/memscan/sfgps.cs` | 从游戏内存读降落区中心经纬度、半径、星球（只读，经 Address Library 解析地址） |
+| `tools/arm-landing.ps1` | 设置下一次星图降落的目标 |
+| `tools/make-guide.ps1` | 同一降落区内换算旧信标位置（不需要插件时使用） |
+| `plugin/` | OSBLanding SFSE 插件（CommonLibSF / xmake） |
+| `tools/memscan/memscan.cs`、`vecscan.cs`、`hwbp.cs`、`tools/xref/` | 逆向用的内存扫描、断点、静态分析工具 |
 
 ### 原型用法
 
@@ -87,3 +122,6 @@ refID 换算：`FF` 开头的 ID 超出 32 位有符号整数，要填负数，�
 14. **测试 4**：偏移改为 3 米，复制品可见、可选中 / 移动 / 拆除，返还材料。**两大风险点均解决。**
 15. **原型**：编写 `OSB.psc`（Backup / R / Done）与 `make-restore.ps1`（日志 → `bat` 文件）。排查并修复：`GetFormID()` 卡死、信标地基重复、MOD 物件与炮塔被漏掉。
 16. **测试 5**：完整流程（备份 → 拆光 → `bat OSB_Restore`），6 个物件全部恢复，无重复。
+17. **跨存档定位**：内存扫描找到降落区中心经纬度（Address Library ID 945580 = `BGSPlanet::Manager`），写出独立读取工具 `sfgps`，不再依赖 GPS MOD。
+18. **精确降落**：星图点选精度不够（最近只能落在 59 km 外）；用 Iced 静态分析找到 `SetLandingSite`（ID 51740）及其调用方，写 SFSE 插件 OSBLanding 替换星图降落坐标，GitHub Actions 编译。
+19. **测试 6**：在建哨站之前的旧存档里，星图随便点一处，插件把降落中心精确替换为原坐标；`bat OSB_Guide` 到达原信标位置（高差 0.64 m），放信标后用绝对模式 `bat OSB_Restore`，哨站完整恢复，位置和高度正确。
