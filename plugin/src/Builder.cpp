@@ -149,6 +149,46 @@ namespace OSB::Builder
 			return r;
 		}
 
+		// Snap search (21D2E20, called from the placement update): finds a connection point on a nearby hab,
+		// sets +0x188 and moves the preview (+0x138) there; the update then posts the switch to the snapped
+		// state. It picks the connection nearest the aim, which is not always the saved one: then drop the
+		// snap and keep the saved spot (the hab is then placed like a free-standing one).
+		using SnapSearch_t = std::uintptr_t (*)(void* a_engine);
+		SnapSearch_t g_snapSearch = nullptr;
+		std::atomic<bool> g_logSnap{ false };
+
+		std::uintptr_t SnapSearchHook(void* a_engine)
+		{
+			const auto r = g_snapSearch(a_engine);
+			if (!g_forcing.load()) {
+				return r;
+			}
+			const auto e = reinterpret_cast<std::uintptr_t>(a_engine);
+			auto& snapped = *reinterpret_cast<std::uint8_t*>(e + 0x188);
+			if (!snapped) {
+				return r;
+			}
+			auto* p = reinterpret_cast<float*>(e + kPreviewPos);
+			float tx, ty, tz;
+			{
+				std::scoped_lock l(g_targetLock);
+				tx = g_tx; ty = g_ty; tz = g_tz;
+			}
+			const bool match = std::abs(p[0] - tx) < 1.0f && std::abs(p[1] - ty) < 1.0f && std::abs(p[2] - tz) < 1.0f;
+			if (g_logSnap.exchange(false)) {
+				REX::INFO("builder: snap found at {:.2f} {:.2f} {:.2f}, saved {:.2f} {:.2f} {:.2f}: {}", p[0], p[1], p[2], tx, ty, tz,
+					match ? "using it" : "ignoring it");
+			}
+			if (!match) {
+				snapped = 0;
+				*reinterpret_cast<std::uint8_t*>(e + 0x18A) = 0;
+				p[0] = tx;
+				p[1] = ty;
+				p[2] = tz;
+			}
+			return r;
+		}
+
 		// Auto-foundation state (habs after the first commit): the player sets the height with the camera pitch,
 		// then commits again. 21D5CE0 uses the fixed height at engine+0x19C when engine+0x198 is set (else the
 		// pitch), clamps it to [ground +0x1A0, max +0x1A4] and writes the preview z (+0x140).
@@ -376,6 +416,7 @@ namespace OSB::Builder
 			g_lockZ = g_forceAll.load() && a_job.size < kSmallObject;
 			g_logAim = true;
 			g_logFoundation = true;
+			g_logSnap = true;
 			PostNewItem(a_entry, a_job.formID);
 			const bool got = WaitFor([&] { return CurrentItem() && CurrentItem() != before; }, 3000);
 			if (got) {
@@ -484,6 +525,7 @@ namespace OSB::Builder
 		g_precheck = HookCall<Precheck_t>(kUpdatePlacement, kPrecheckCallOff, &PrecheckHook, "placement pre-check (21D3DD0)");
 		g_update = HookCall<Update_t>(kStateUpdatePlacement, kUpdateCallOff, &UpdateHook, "placement update (21D74B0)");
 		g_foundation = HookCall<Foundation_t>(kStateUpdateFoundation, kFoundationCallOff, &FoundationHook, "foundation height (21D5CE0)");
+		g_snapSearch = HookCall<SnapSearch_t>(kUpdatePlacement, 0x6C4, &SnapSearchHook, "snap search (21D2E20)");
 		HookSlot<0>(REL::ID(466620), 0xB8 / 8, "StateUpdatePlacement commit (21B2E20)");
 		HookSlot<1>(REL::ID(466892), 0xB8 / 8, "StateUpdateAutoFoundation commit (21B2360)");
 		// a hab next to or on another hab snaps first; this state commits only with +0x188 (snap found),
