@@ -4,7 +4,7 @@ Scriptname OSB_Test
 ; Usage (console):
 ;   cgf "OSB_Test.List" <beaconRefID decimal>
 ;   cgf "OSB_Test.PlaceTest" <beaconRefID decimal> <outpostObjectRefID decimal>
-; Output: notifications + Papyrus log（Documents\My Games\Starfield\Logs\Script\Papyrus.0.log）
+; Output: notifications + Papyrus log (Documents\My Games\Starfield\Logs\Script\Papyrus.0.log)
 
 ObjectReference Function GetRef(int aiFormID) global
 	ObjectReference ref = Game.GetForm(aiFormID) as ObjectReference
