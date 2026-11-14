@@ -1,51 +1,69 @@
 # Starfield 哨站备份与恢复 MOD：可行性探索记录
 
 > 本文记录了与 Claude Code 的讨论与测试过程，以及最终结论。
+> 2026-11-14 更新：找到 `WorkshopItemKeyword` 链接方案，纯 Papyrus 原型已在游戏中完成“备份 → 拆光 → 恢复”全流程。
 
 ## 总结
 
 | 项目 | 结论 |
 |---|---|
-| 目标 | 备份哨站，并在**同一位置**原地恢复；支持跨存档（方案 B：SFSE 外部文件） |
-| 纯 Papyrus | ❌ 不可行：列不全哨站物件；`PlaceAtMe` 生成的物件不可见、也不属于哨站，且没有函数能把物件挂回哨站 |
-| SFSE C++ | ⚠️ 理论可行，但需要逆向 `Starfield.exe` 1.16.244 的哨站系统（物件归属判断、注册到哨站的内部函数）；CommonLibSF 只支持到 1.14.74，且很可能没有覆盖哨站系统 |
-| 推荐下一步 | 在 Nexus Mods 搜索 “outpost blueprint / outpost transfer / outpost save”，优先使用或参考现成 MOD |
+| 目标 | 备份哨站，并在**同一位置**原地恢复；支持跨存档 |
+| 纯 Papyrus | ✅ **可行（原型已验证）**：`GetRefsLinkedToMe(WorkshopItemKeyword)` 能列全哨站物件；`PlaceAtMe` + `SetLinkedRef(信标, WorkshopItemKeyword)` + `Enable()` 能把新物件挂回哨站 |
+| 跨存档 | 不需要 SFSE：备份写入 Papyrus 用户日志，PowerShell 转成控制台批处理文件，用 `bat` 恢复。跨存档坐标是否一致**尚未验证** |
+| SFSE C++ | 目前不需要 |
+
+### 原型用法
+
+文件：`papyrus/OSB.psc`、`tools/make-restore.ps1`。不需要 esp。
+
+1. 编译 `OSB.psc`（`tools/compile.ps1`；若复制到 `Program Files` 失败，用管理员 PowerShell 或手动复制 `.pex` 到 `Data\Scripts`）。
+2. 游戏内控制台：`cgf "OSB.Backup" <信标 refID 的有符号十进制>`。关闭控制台，等提示 `OSB: backed up N objects`（游戏切到后台会暂停脚本）。
+3. PowerShell：`powershell -ExecutionPolicy Bypass -File tools\make-restore.ps1`
+   生成 `<Starfield>\OSB_Restore.txt`，并在 `backups\` 留一份带时间戳的副本。
+4. 站在目标哨站范围内（信标已放好），控制台：`bat OSB_Restore`。
+
+refID 换算：`FF` 开头的 ID 超出 32 位有符号整数，要填负数，例如 `FF044D75` → `-16495243`：
+`[BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]'0xFF044D75'),0)`
+
+### 已验证（测试哨站：信标 + 大气水提取器 + 皮椅 + 1 个 MOD 物件 + 炮塔）
+
+- `WorkshopItemKeyword` = `Starfield.esm` KYWD `00054BA6`（与 FO4 相同）。原版 `.psc` 源码里没有出现，是扫描 ESM 找到的。
+- `beacon.GetRefsLinkedToMe(kw)` 返回 14 个引用，全部属于该信标；旧方法最多找到 2 个。
+- 复制物件并链接后：可见、`GetWorkshop()` 返回信标、在建造范围内、可在建造模式选中 / 移动 / 拆除，拆除返还材料。
+- 完整流程：6 个物件全部恢复（提取器、提取器地基、椅子、MOD 物件的 2 个引用、炮塔），无重复。
+
+### 踩过的坑
+
+- **坐标单位是米**。最初偏移 `+300.0` 把复制品放到 300 米外，看不见、也不在建造范围内。
+- **`Form.GetFormID()` 会让脚本永久卡住**（对 `MapMarker_LongRange 00254244`、`00000021` 等基础物件）。现在备份脚本不调用它，只把 `[Form < (xxxxxxxx)>]` 字符串写进日志，由 `make-restore.ps1` 解析十六进制 ID。
+- `FF` 开头的引用 ID 每次读档都可能变化，备份只存“基础物件 + 坐标 + 角度 + 缩放”。
+- 炮塔是 `ActorBase`（`002E181C`），不能按“NPC 一律跳过”处理。
+- 信标自带的地基与信标坐标完全重合，按坐标跳过。
+- MOD 物件可能只以 PackIn 引用出现，PackIn 不能跳过。
+- 游戏切到后台会暂停，Papyrus 也会停；第三方脚本卡住（日志里大量 `Stack potentially stalled`）会让备份变慢。
+
+### 备份时跳过的内容
+
+- 信标本身、`OutpostBeacon_Packin`、`MapMarker_LongRange`、`NPCClipboard`（信标组成部分）
+- 与信标坐标重合的物件
+- FormID < `0x800` 的引擎保留物件（在 `make-restore.ps1` 中过滤）
+
+### 已知限制 / 待办
+
+1. 跨存档：坐标在另一存档中是否一致，未验证。
+2. MOD 物件的 FormID 含加载顺序前缀，加载顺序变化后会找不到（日志里会报 base form missing）。可改为存“插件名 + 本地 ID”。
+3. 同一份备份执行两次会产生重复物件；恢复前需手动拆光。
+4. 不恢复：电线 / 货物链接、容器内物品、指派的船员。
+5. 大型哨站的性能未测。
+6. `OSB.psc` 里还留着排查用的 `Backup step` 日志，稳定后可删。
 
 ### 环境信息
 - 游戏版本：**1.16.244.0**（Steam）
-- 已安装：Creation Kit、SFSE（`sfse_loader.exe`）、Address Library（含 `versionlib-1-16-244-0.bin`）
-- SFSE 官方已支持 1.16.244；SFSE 本身不提供注册 Papyrus 原生函数的接口，需要 CommonLibSF
-- CommonLibSF 最后更新 2025-09，`RUNTIME_LATEST = 1.14.74`；其 Address Library 加载逻辑会读取 Steam 版的 `versionlib-1-16-244-0.bin`，所以地址库本身不是问题，风险在内部结构是否变化
-
-### 关键测试结果（`papyrus/OSB_Test.psc`）
-测试哨站：信标 + 4 个建造物。
-
-| 方法 | 找到 | 说明 |
-|---|---|---|
-| `GetWorkshopResourceObjects(None, 0)` | 1 | 仅资源类物件（储物箱 `FF0AB60D`） |
-| `GetWorkshopOwnedObjects(Player)` | 2 | 储物箱 `FF0AB60D` + 一个 ActorBase 物件 `FF0AB985` |
-| `GetRefsLinkedToMe(None)` | 0 | `None` |
-| `GetDestructibleOutpostObjects()` | 1 | 同一个储物箱 |
-| **去重合计** | **2 / 4** | 有 2 个物件任何方法都找不到 |
-
-- 信标的 `GetWorkshop()` 返回它自己，说明信标就是哨站对象。
-- 控制台里点到的 `PKIN`（Pack-In）是预组装外壳，实际物件是紧随其后的另一个引用。
-- `PlaceTest`（复制 CONT 储物箱或 PKIN）：生成了新引用，但 `workshop=None`、`inBuildableArea=false`，游戏中**不可见**。
-
-### 可用的 Papyrus 接口（来自原版源码）
-- `ObjectReference.GetWorkshop()`、`GetWorkshopOwnedObjects(Actor)`、`GetWorkshopResourceObjects(ActorValue, int)`、`GetDestructibleOutpostObjects()`、`IsWithinBuildableArea(ObjectReference)`
-- `FindAllReferencesOfType(Form/FormList, radius)`、`FindAllReferencesWithKeyword(...)`
-- `Game.GetForm(int)`、`Game.GetFormFromFile(int, string)`
-- 事件：`OnWorkshopObjectPlaced` / `OnWorkshopObjectRemoved` / `OnWorkshopObjectMoved`
-- 信标脚本：`OutpostBeaconScript`（不存在 FO4 式的 `WorkshopScript`）
+- 已安装：Creation Kit（含 `PapyrusCompiler.exe`）、SFSE、Address Library
+- CommonLibSF 停在 1.14.74；当前方案不依赖它
 
 ### 测试残留清理
-`PlaceTest` 在存档中留下了不可见空引用：`FF04A74C`、`FF04A751`、`FF0ABEF8`、`FF0ABEFB`。读取测试前存档，或在控制台执行 `prid <ID>` + `markfordelete`。不再需要时可删除 `Data\Scripts\OSB_Test.pex`。
-
-### 若将来继续
-1. 列全物件：CK 中建立包含所有可建造物件的 FormList，用 `FindAllReferencesOfType` 在信标周围搜索，再用 `GetWorkshop()` 过滤；或用 SFSE C++ 遍历单元格引用。
-2. 挂回哨站：需要逆向游戏内部的建造/注册函数（SFSE C++），这是最难、最不确定的部分。
-3. 关注 CommonLibSF 更新，或公开的哨站系统逆向成果。
+早期 `PlaceTest` 在存档中留下了不可见引用：`FF04A74C`、`FF04A751`、`FF0ABEF8`、`FF0ABEFB`。读取测试前存档，或在控制台执行 `prid <ID>` + `markfordelete`。
 
 ---
 
@@ -63,4 +81,9 @@
 8. **验证脚本**：编写 `papyrus/OSB_Test.psc` 与 `tools/compile.ps1`，用户成功编译（需 `Unblock-File` + `-ExecutionPolicy Bypass`），在游戏中用 `cgf` 调用。
 9. **测试 1（旧哨站，复制 PKIN）**：只找到 1 个物件，复制品不可见、不属于哨站。
 10. **测试 2（新哨站，4 物件，复制 CONT 储物箱）**：各方法去重后只找到 2/4 个物件；复制品仍不可见、不属于哨站。
-11. **结论**：纯 Papyrus 不可行；SFSE C++ 需要逆向游戏程序，Claude 在云端无法完成，结果不确定。建议先寻找现成 MOD，或暂停，等待 CommonLibSF / 社区逆向成果。
+11. **初步结论**：纯 Papyrus 不可行；SFSE C++ 需要逆向游戏程序。
+12. **复查**：发现测试只用了 `GetRefsLinkedToMe(None)`，而 FO4 的工坊物件是用 `WorkshopItemKeyword` 链接的。扫描 `Starfield.esm` 找到该关键字 `00054BA6`。
+13. **测试 3**：`GetRefsLinkedToMe(kw)` 找到 14 个引用，全部属于信标。复制品链接后 `workshop` 从 `None` 变为信标，但偏移 300 米导致不可见。
+14. **测试 4**：偏移改为 3 米，复制品可见、可选中 / 移动 / 拆除，返还材料。**两大风险点均解决。**
+15. **原型**：编写 `OSB.psc`（Backup / R / Done）与 `make-restore.ps1`（日志 → `bat` 文件）。排查并修复：`GetFormID()` 卡死、信标地基重复、MOD 物件与炮塔被漏掉。
+16. **测试 5**：完整流程（备份 → 拆光 → `bat OSB_Restore`），6 个物件全部恢复，无重复。
