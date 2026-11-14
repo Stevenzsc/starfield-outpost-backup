@@ -999,6 +999,11 @@ namespace OSB
 		}
 	}
 
+	std::filesystem::path DataFolder()
+	{
+		return Folder();
+	}
+
 	bool TakeArmedLanding(std::uint32_t a_planet, double& a_latDeg, double& a_lonDeg)
 	{
 		std::scoped_lock l(g_lock);

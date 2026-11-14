@@ -8,6 +8,7 @@
 // Documents\My Games\Starfield\SFSE\Logs\OSBLanding.log.
 
 #include "Backup.h"
+#include "Diag.h"
 
 #include <cmath>
 #include <format>
@@ -136,6 +137,7 @@ namespace
 		if (a_msg && a_msg->type == SFSE::MessagingInterface::kPostDataLoad) {
 			DumpLoadOrder();
 			OSB::RegisterNatives();
+			OSB::Diag::Install(OSB::DataFolder() / "diag.txt");
 		}
 	}
 
