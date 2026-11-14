@@ -17,7 +17,13 @@ namespace OSB::Diag
 		// Address Library 1.16.244
 		constexpr REL::ID kItemPlacedSource{ 73963 };          // +0xF4F840
 		constexpr REL::ID kWorkshopItemPlacedSource{ 73962 };  // +0xF4F7A0
-		constexpr REL::ID kPackinItemVtbl{ 430826 };           // +0x4C254A0 Workshop::PackinWorkshopItem
+		// workshop item vtables whose vfunc[0xA0] (commit) is hooked
+		struct ItemClass { REL::ID vtbl; const char* name; };
+		const ItemClass kItemClasses[] = {
+			{ REL::ID(430826), "PackinWorkshopItem" },        // +0x4C254A0
+			{ REL::ID(430834), "DecoratedHabWorkshopItem" },  // +0x4C25710
+			{ REL::ID(430818), "SingleWorkshopItem" },        // +0x4C25298
+		};
 		constexpr std::uintptr_t kItemPlacedSourceRva = 0xF4F840;
 		constexpr std::size_t kCommitSlot = 0xA0 / 8;
 
@@ -96,33 +102,35 @@ namespace OSB::Diag
 			}
 		}
 
-		using Commit_t = std::uintptr_t (*)(void* a_item, void* a_engine);
-		Commit_t g_commit = nullptr;
+		using Commit_t = std::uintptr_t (*)(void* a_item, void* a_engine, std::uintptr_t a_3, std::uintptr_t a_4);
+		Commit_t g_commit[3]{};
 
-		std::uintptr_t CommitHook(void* a_item, void* a_engine)
+		template <std::size_t I>
+		std::uintptr_t CommitHook(void* a_item, void* a_engine, std::uintptr_t a_3, std::uintptr_t a_4)
 		{
-			REX::INFO("diag: === PackinWorkshopItem commit item {} engine {}", a_item, a_engine);
+			REX::INFO("diag: === {} commit item {} engine {}", kItemClasses[I].name, a_item, a_engine);
 			REX::INFO("diag:   stack{}", Stack());
 			Dump("item", reinterpret_cast<std::uintptr_t>(a_item), 0xF0);
 			Dump("engine", reinterpret_cast<std::uintptr_t>(a_engine), 0x700);
-			const auto r = g_commit(a_item, a_engine);
+			const auto r = g_commit[I](a_item, a_engine, a_3, a_4);
 			REX::INFO("diag: === commit returned {:X}", r);
 			Dump("item after", reinterpret_cast<std::uintptr_t>(a_item), 0xF0);
 			return r;
 		}
 
+		template <std::size_t I>
 		void HookCommit()
 		{
-			auto* slot = reinterpret_cast<std::uintptr_t*>(kPackinItemVtbl.address()) + kCommitSlot;
+			auto* slot = reinterpret_cast<std::uintptr_t*>(kItemClasses[I].vtbl.address()) + kCommitSlot;
 			unsigned long old = 0;
 			if (!VirtualProtect(slot, sizeof(*slot), 0x04 /*PAGE_READWRITE*/, &old)) {
 				REX::WARN("diag: VirtualProtect failed");
 				return;
 			}
-			g_commit = reinterpret_cast<Commit_t>(*slot);
-			*slot = reinterpret_cast<std::uintptr_t>(&CommitHook);
+			g_commit[I] = reinterpret_cast<Commit_t>(*slot);
+			*slot = reinterpret_cast<std::uintptr_t>(&CommitHook<I>);
 			VirtualProtect(slot, sizeof(*slot), old, &old);
-			REX::INFO("diag: hooked PackinWorkshopItem commit (was +{:X})", reinterpret_cast<std::uintptr_t>(g_commit) - ImageBase());
+			REX::INFO("diag: hooked {} commit (was +{:X})", kItemClasses[I].name, reinterpret_cast<std::uintptr_t>(g_commit[I]) - ImageBase());
 		}
 
 		class ItemPlacedSink : public RE::BSTEventSink<RE::Workshop::ItemPlacedEvent>
@@ -166,7 +174,9 @@ namespace OSB::Diag
 		if (ws) {
 			ws->RegisterSink(&wsSink);
 		}
-		HookCommit();
+		HookCommit<0>();
+		HookCommit<1>();
+		HookCommit<2>();
 		REX::INFO("diag: workshop placement logging on");
 	}
 }
