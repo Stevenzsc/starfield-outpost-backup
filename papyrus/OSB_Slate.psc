@@ -1,44 +1,183 @@
 Scriptname OSB_Slate extends ObjectReference
-{ Outpost Backup slate: read it from the inventory to back up, land at, or restore an outpost.
-  Needs the OutpostBackup SFSE plugin (OSB_Native) and OSB.psc. }
+{ Outpost Backup slate: read it from the inventory to back up, land at, restore, or delete saved outposts.
+  Needs the OutpostBackup SFSE plugin (OSB_Native) and OSB.psc.
+  The extra menus are looked up by form ID in OutpostBackup.esp (written by tools\esp\PatchEsp).
+
+  Land and Restore start an automatic flow: wait until you are outside near the saved outpost,
+  move you onto the saved beacon spot, wait for you to build an Outpost Beacon, then restore. }
 
 Message Property OSB_MenuMsg Auto Const Mandatory
-{ Buttons: 0 Back up this outpost, 1 Land at the saved outpost, 2 Restore the saved outpost here, 3 Cancel }
+{ Buttons: 0 Back up, 1 Land, 2 Restore, 3 Delete, 4 Cancel }
+
+int Property kPickMsg = 0x80B AutoReadOnly Hidden
+int Property kFarBeaconMsg = 0x80D AutoReadOnly Hidden
+int Property kDupMsg = 0x80E AutoReadOnly Hidden
+int Property kDeleteMsg = 0x80F AutoReadOnly Hidden
+
+float Property kMaxGuideMeters = 2000.0 AutoReadOnly Hidden      ; farther than this: land again first
+float Property kBeaconNearMeters = 50.0 AutoReadOnly Hidden      ; a beacon this close to the saved spot counts
+float Property kBeaconToleranceMeters = 25.0 AutoReadOnly Hidden ; farther than this: ask before restoring
+int Property kPageSize = 8 AutoReadOnly Hidden
+float Property kPollSeconds = 3.0 AutoReadOnly Hidden
+float Property kArriveTimeout = 7200.0 AutoReadOnly Hidden       ; real seconds to wait for the landing
+float Property kBeaconTimeout = 1800.0 AutoReadOnly Hidden       ; real seconds to wait for the beacon
+
+Message Function Msg(int aiLocalID)
+	return Game.GetFormFromFile(aiLocalID, "OutpostBackup.esp") as Message
+EndFunction
+
+Function Say(string asText)
+	Debug.Notification("Outpost Backup: " + asText)
+EndFunction
 
 Event OnRead()
+	if OSB_Native.Version() < 2
+		Debug.MessageBox("Outpost Backup: the SFSE plugin is missing or out of date.\n\nInstall Data\\SFSE\\Plugins\\OutpostBackup.dll and start the game with SFSE (sfse_loader.exe).")
+		return
+	endif
 	int choice = OSB_MenuMsg.Show()
+	if choice < 0 || choice > 3
+		return
+	endif
+	if !OSB_Native.TryLock()
+		Say("still busy with the last action, please wait.")
+		return
+	endif
+	int flow = 0
 	if choice == 0
 		DoBackup()
 	elseif choice == 1
-		DoLand()
+		flow = DoLand()
 	elseif choice == 2
-		DoRestore()
+		flow = DoRestore()
+	elseif choice == 3
+		DoDelete()
+	endif
+	OSB_Native.Unlock()
+	if flow > 0
+		RunFlow(flow)
 	endif
 EndEvent
 
+; ---------- checks ----------
+
+bool Function IsOutsideOnPlanet()
+	Actor player = Game.GetPlayer()
+	return !player.IsInSpace() && player.GetCurrentPlanet() != None && !player.IsInInterior()
+EndFunction
+
+; True when the player stands outside on a planet and is not fighting. Otherwise says why and returns false.
+bool Function CheckOnSurface()
+	Actor player = Game.GetPlayer()
+	if player.IsInSpace() || player.GetCurrentPlanet() == None
+		Say("land on a planet first.")
+		return false
+	endif
+	if player.IsInInterior()
+		Say("go outside first (not in a ship or building).")
+		return false
+	endif
+	if player.IsInCombat()
+		Say("not during combat.")
+		return false
+	endif
+	return true
+EndFunction
+
+; Number of outpost objects linked to the beacon, without the beacon's own parts.
+int Function CountOutpostObjects(ObjectReference akBeacon, Keyword akKeyword)
+	ObjectReference[] refs = akBeacon.GetRefsLinkedToMe(akKeyword)
+	int n = 0
+	int i = 0
+	while refs && i < refs.Length
+		ObjectReference r = refs[i]
+		if r && r != akBeacon && !OSB.IsSkippedBase(r.GetBaseObject()) && !OnBeacon(r, akBeacon)
+			n += 1
+		endif
+		i += 1
+	endwhile
+	return n
+EndFunction
+
+bool Function OnBeacon(ObjectReference akRef, ObjectReference akBeacon)
+	return Math.Abs(akRef.GetPositionX() - akBeacon.GetPositionX()) < 0.05 && Math.Abs(akRef.GetPositionY() - akBeacon.GetPositionY()) < 0.05 && Math.Abs(akRef.GetPositionZ() - akBeacon.GetPositionZ()) < 0.05
+EndFunction
+
+float Function Distance2D(float afX1, float afY1, float afX2, float afY2)
+	float dx = afX1 - afX2
+	float dy = afY1 - afY2
+	return Math.Sqrt(dx * dx + dy * dy)
+EndFunction
+
+; The outpost beacon near the saved spot, or None.
+ObjectReference Function BeaconNearSpot(float[] akSpot)
+	ObjectReference b = OSB.FindBeacon()
+	if b && Distance2D(b.GetPositionX(), b.GetPositionY(), akSpot[0], akSpot[1]) <= kBeaconNearMeters
+		return b
+	endif
+	return None
+EndFunction
+
+; ---------- choosing a saved outpost ----------
+
+; Shows the saved outposts and selects the chosen one. Returns true when one is selected.
+bool Function PickBackup(bool abHereOnly)
+	int n = OSB_Native.ListBackups(abHereOnly)
+	if n <= 0
+		if abHereOnly
+			Debug.MessageBox("No saved outpost on this planet.\n\nChoose 'Land at a saved outpost' to fly to one first.")
+		else
+			Debug.MessageBox("No saved outposts yet.\n\nStand inside an outpost and choose 'Back up this outpost'.")
+		endif
+		return false
+	endif
+	Message pick = Msg(kPickMsg)
+	if pick == None
+		Say("OutpostBackup.esp is out of date.")
+		return false
+	endif
+	int page = 0
+	while true
+		OSB_Native.FillPicker(pick, page)
+		int r = OSB_Native.PickerResult(pick.Show())
+		if r == -2
+			page += 1
+			if page * kPageSize >= n
+				page = 0
+			endif
+		elseif r < 0
+			return false
+		else
+			return OSB_Native.SelectBackup(r)
+		endif
+	endwhile
+	return false
+EndFunction
+
+; ---------- actions ----------
+
 Function DoBackup()
+	if !CheckOnSurface()
+		return
+	endif
 	ObjectReference beacon = OSB.FindBeacon()
 	Keyword kw = OSB.GetWorkshopItemKeyword()
 	if beacon == None || kw == None
-		Debug.Notification("Outpost Backup: stand inside the outpost you want to back up.")
+		Say("stand inside the outpost you want to back up.")
 		return
 	endif
-	if !OSB_Native.BeginBackup(beacon.GetPositionX(), beacon.GetPositionY(), beacon.GetPositionZ(), beacon.GetAngleZ())
-		Debug.Notification("Outpost Backup: only works on a planet surface.")
+	if !OSB_Native.BeginBackup(beacon, beacon.GetPositionX(), beacon.GetPositionY(), beacon.GetPositionZ(), beacon.GetAngleZ())
+		Say("only works on a planet surface.")
 		return
 	endif
-	Debug.Notification("Outpost Backup: backing up, please wait...")
-	float bx = beacon.GetPositionX()
-	float by = beacon.GetPositionY()
-	float bz = beacon.GetPositionZ()
+	Say("backing up, please wait...")
 	ObjectReference[] refs = beacon.GetRefsLinkedToMe(kw)
 	int i = 0
 	while refs && i < refs.Length
 		ObjectReference r = refs[i]
 		if r && r != beacon
 			Form base = r.GetBaseObject()
-			bool onBeacon = Math.Abs(r.GetPositionX() - bx) < 0.05 && Math.Abs(r.GetPositionY() - by) < 0.05 && Math.Abs(r.GetPositionZ() - bz) < 0.05
-			if !OSB.IsSkippedBase(base) && !onBeacon
+			if !OSB.IsSkippedBase(base) && !OnBeacon(r, beacon)
 				OSB_Native.AddItem(base, r.GetPositionX(), r.GetPositionY(), r.GetPositionZ(), r.GetAngleX(), r.GetAngleY(), r.GetAngleZ(), r.GetScale(), (base as PackIn) != None)
 			endif
 		endif
@@ -46,43 +185,146 @@ Function DoBackup()
 	endwhile
 	int n = OSB_Native.EndBackup()
 	if n < 0
-		Debug.Notification("Outpost Backup: could not save the backup.")
+		Say("could not save the backup.")
+	elseif n == 0
+		Say("this outpost has nothing to back up yet.")
+	elseif OSB_Native.LastBackupReplaced()
+		Say("updated the backup of this outpost (" + n + " objects).")
 	else
-		Debug.Notification("Outpost Backup: saved " + n + " objects.")
+		Say("saved " + n + " objects.")
 	endif
 EndFunction
 
-Function DoLand()
-	if OSB_Native.ArmLanding()
-		Debug.MessageBox("Landing set.\n\nOpen the star map on the planet of the saved outpost and land anywhere: your ship will land at the saved spot.\n\nThen read this slate again and choose Restore.")
-	else
-		Debug.Notification("Outpost Backup: no saved outpost yet.")
+; Returns a flow id to run after the menu closes, or 0.
+int Function DoLand()
+	if !PickBackup(false)
+		return 0
 	endif
+	if !OSB_Native.ArmLanding()
+		Say("could not read that backup.")
+		return 0
+	endif
+	int flow = OSB_Native.NewFlow()
+	float[] spot = OSB_Native.GetGuideSpot()
+	if IsOutsideOnPlanet() && spot && spot.Length >= 4 && spot[3] <= kMaxGuideMeters
+		return flow   ; already there: the flow moves you onto the spot
+	endif
+	string planet = OSB_Native.GetSelectedPlanetName()
+	if Game.IsFarTravelControlsEnabled()
+		Debug.Notification("Outpost Backup: open " + planet + " in the star map and land anywhere on it.")
+		Game.ShowGalaxyStarMapMenu()
+	else
+		Debug.MessageBox("Landing set.\n\nWhen you can travel again, open " + planet + " in the star map and land anywhere on it: your ship lands at the saved outpost.")
+	endif
+	return flow
 EndFunction
 
-Function DoRestore()
+; Returns a flow id to run after the menu closes, or 0.
+int Function DoRestore()
+	if !CheckOnSurface()
+		return 0
+	endif
+	int here = OSB_Native.SelectOnlyHere()
+	if here == 0
+		Debug.MessageBox("No saved outpost on this planet.\n\nChoose 'Land at a saved outpost' to fly to one first.")
+		return 0
+	elseif here > 1 && !PickBackup(true)
+		return 0
+	endif
 	float[] spot = OSB_Native.GetGuideSpot()
 	if spot == None || spot.Length < 4
-		Debug.Notification("Outpost Backup: no saved outpost on this planet.")
-		return
+		Say("that outpost is on another planet.")
+		return 0
 	endif
-	ObjectReference beacon = OSB.FindBeacon()
-	if beacon == None
-		if spot[3] > 2000.0
-			Debug.MessageBox("The saved outpost is " + Math.Floor(spot[3] / 1000.0) + " km from here.\n\nChoose 'Land at the saved outpost' first, then land on this planet again.")
+	if spot[3] > kMaxGuideMeters
+		Debug.MessageBox("The saved outpost is " + Math.Floor(spot[3] / 1000.0) + " km from here.\n\nChoose 'Land at a saved outpost': the star map opens and your ship lands right at it.")
+		return 0
+	endif
+	return OSB_Native.NewFlow()
+EndFunction
+
+; Arrive near the saved outpost -> stand on the beacon spot -> wait for a beacon -> restore.
+Function RunFlow(int aiFlow)
+	Actor player = Game.GetPlayer()
+	float[] spot
+
+	; 1. wait until you are outside near the saved outpost (after the landing)
+	float waited = 0.0
+	while true
+		if OSB_Native.CurrentFlow() != aiFlow
 			return
 		endif
-		Debug.MessageBox("Follow the messages to the saved outpost spot, build an Outpost Beacon there, then read this slate again and choose Restore.")
-		OSB.Guide(spot[0], spot[1], spot[2], 300)
+		if IsOutsideOnPlanet()
+			spot = OSB_Native.GetGuideSpot()
+			if spot && spot.Length >= 4 && spot[3] <= kMaxGuideMeters
+				Utility.Wait(1.0)
+				; 2. stand on the saved beacon spot (unless a beacon is already there)
+				ObjectReference beacon = BeaconNearSpot(spot)
+				if beacon == None
+					if Distance2D(player.GetPositionX(), player.GetPositionY(), spot[0], spot[1]) > 3.0
+						player.SetPosition(spot[0], spot[1], spot[2] + 1.0)
+					endif
+					Debug.MessageBox("You are on the saved outpost spot.\n\nBuild an Outpost Beacon right here. The outpost is restored as soon as the beacon is built.")
+					beacon = WaitForBeacon(aiFlow, spot)
+				endif
+				if beacon
+					RestoreAt(beacon, spot)
+				endif
+				return
+			endif
+		endif
+		Utility.Wait(kPollSeconds)
+		waited += kPollSeconds
+		if waited > kArriveTimeout
+			Say("stopped waiting for the landing. Choose Land again when you are ready.")
+			return
+		endif
+	endwhile
+EndFunction
+
+ObjectReference Function WaitForBeacon(int aiFlow, float[] akSpot)
+	float waited = 0.0
+	while waited < kBeaconTimeout
+		Utility.Wait(kPollSeconds)
+		waited += kPollSeconds
+		if OSB_Native.CurrentFlow() != aiFlow
+			return None
+		endif
+		ObjectReference b = BeaconNearSpot(akSpot)
+		if b
+			Utility.Wait(2.0)   ; let the build finish
+			return b
+		endif
+	endwhile
+	Say("no beacon built. Choose Restore when the beacon is ready.")
+	return None
+EndFunction
+
+Function RestoreAt(ObjectReference akBeacon, float[] akSpot)
+	while !OSB_Native.TryLock()
+		Utility.Wait(1.0)
+	endwhile
+	Keyword kw = OSB.GetWorkshopItemKeyword()
+	float beaconOff = Distance2D(akBeacon.GetPositionX(), akBeacon.GetPositionY(), akSpot[0], akSpot[1])
+	if beaconOff > kBeaconToleranceMeters && Msg(kFarBeaconMsg).Show(beaconOff) != 0
+		OSB_Native.Unlock()
 		return
 	endif
+	int existing = CountOutpostObjects(akBeacon, kw)
+	if existing > 0 && Msg(kDupMsg).Show(existing) != 0
+		OSB_Native.Unlock()
+		return
+	endif
+
 	int n = OSB_Native.LoadRestore()
 	if n <= 0
-		Debug.Notification("Outpost Backup: nothing to restore.")
+		Say("nothing to restore.")
+		OSB_Native.Unlock()
 		return
 	endif
-	Debug.Notification("Outpost Backup: restoring " + n + " objects...")
+	Say("restoring " + n + " objects...")
 	int placed = 0
+	int missing = 0
 	int i = 0
 	while i < n
 		Form base = OSB_Native.GetRestoreForm(i)
@@ -92,9 +334,30 @@ Function DoRestore()
 				placed += 1
 			endif
 		else
+			missing += 1
 			Debug.Trace("OSB: restore skipped " + OSB_Native.GetRestoreName(i) + " (not found: plugin missing?)")
 		endif
 		i += 1
 	endwhile
-	Debug.Notification("Outpost Backup: restored " + placed + " of " + n + " objects.")
+	OSB_Native.Unlock()
+	if missing > 0
+		Debug.MessageBox("Restored " + placed + " of " + n + " objects.\n\n" + missing + " objects come from mods that are not installed now.")
+	else
+		Say("restored " + placed + " of " + n + " objects.")
+	endif
+EndFunction
+
+Function DoDelete()
+	if !PickBackup(false)
+		return
+	endif
+	string name = OSB_Native.GetSelectedName()
+	if Msg(kDeleteMsg).Show() != 0
+		return
+	endif
+	if OSB_Native.DeleteBackup()
+		Say("deleted " + name)
+	else
+		Say("could not delete that backup.")
+	endif
 EndFunction

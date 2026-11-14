@@ -90,6 +90,8 @@ namespace OSB
 		std::uint32_t g_armPlanet = 0;
 		double        g_armLat = 0, g_armLon = 0;
 
+		std::int32_t  g_flow = 0;   // id of the running automatic land-and-restore flow
+
 		bool          g_busy = false;
 		std::chrono::steady_clock::time_point g_busySince;
 
@@ -409,6 +411,28 @@ namespace OSB
 			return std::format("{} - {} ({} objects{})", name, planet, e.count, when);
 		}
 
+		// The selection survives a game restart (a running slate flow is in the save, the plugin state is not).
+		void SaveSelection()
+		{
+			WriteText(Folder() / "selected.txt", g_selected.filename().string());
+		}
+
+		void RestoreSelection()
+		{
+			if (!g_selected.empty()) {
+				return;
+			}
+			std::ifstream f(Folder() / "selected.txt");
+			std::string name;
+			if (f && std::getline(f, name) && !name.empty()) {
+				const auto p = Folder() / "Outposts" / name;
+				std::error_code ec;
+				if (std::filesystem::exists(p, ec)) {
+					g_selected = p;
+				}
+			}
+		}
+
 		const Entry* SelectedEntry()
 		{
 			for (const auto& e : g_list) {
@@ -445,7 +469,7 @@ namespace OSB
 			g_busy = false;
 		}
 
-		bool BeginBackup(std::monostate, RE::TESForm* a_beacon, float a_bx, float a_by, float a_bz, float a_byaw)
+		bool BeginBackup(std::monostate, RE::TESObjectREFR* a_beacon, float a_bx, float a_by, float a_bz, float a_byaw)
 		{
 			std::scoped_lock l(g_lock);
 			const auto s = ReadPlanet();
@@ -459,7 +483,7 @@ namespace OSB
 			g_pending.lat = s.lat;
 			g_pending.lon = s.lon;
 			g_pending.bx = a_bx; g_pending.by = a_by; g_pending.bz = a_bz; g_pending.byaw = a_byaw;
-			if (auto* ref = a_beacon ? a_beacon->AsReference() : nullptr) {
+			if (auto* ref = a_beacon) {
 				if (const char* n = ref->GetDisplayFullName(); n && *n) {
 					g_pending.name = Clean(n);
 				}
@@ -536,6 +560,34 @@ namespace OSB
 			return g_replaced;
 		}
 
+		// Start a new automatic flow; older flows see the id change and stop.
+		std::int32_t NewFlow(std::monostate)
+		{
+			std::scoped_lock l(g_lock);
+			return ++g_flow;
+		}
+
+		std::int32_t CurrentFlow(std::monostate)
+		{
+			std::scoped_lock l(g_lock);
+			return g_flow;
+		}
+
+		// Select the only saved outpost on this planet, if there is exactly one. Returns the number on this planet.
+		std::int32_t SelectOnlyHere(std::monostate)
+		{
+			auto list = ListAll();
+			const auto s = ReadPlanet();
+			std::erase_if(list, [&](const Entry& e) { return e.head.planet != s.planet; });
+			std::scoped_lock l(g_lock);
+			if (list.size() == 1) {
+				g_selected = list[0].path;
+				SaveSelection();
+			}
+			g_list = std::move(list);
+			return std::int32_t(g_list.size());
+		}
+
 		bool HasBackup(std::monostate)
 		{
 			return !ListAll().empty();
@@ -557,9 +609,9 @@ namespace OSB
 
 		// Write page a_page of the list into OSB_PickMsg's buttons: Cancel, [More...], entries.
 		// Returns the number of entries on the page.
-		std::int32_t FillPicker(std::monostate, RE::TESForm* a_msg, std::int32_t a_page)
+		std::int32_t FillPicker(std::monostate, RE::BGSMessage* a_msg, std::int32_t a_page)
 		{
-			auto* msg = a_msg ? a_msg->As<RE::BGSMessage>() : nullptr;
+			auto* msg = a_msg;
 			if (!msg) {
 				return 0;
 			}
@@ -619,6 +671,7 @@ namespace OSB
 				return false;
 			}
 			g_selected = g_list[a_index].path;
+			SaveSelection();
 			return true;
 		}
 
@@ -664,6 +717,7 @@ namespace OSB
 		bool ArmLanding(std::monostate)
 		{
 			std::scoped_lock l(g_lock);
+			RestoreSelection();
 			Backup b;
 			if (g_selected.empty() || !Load(g_selected, b, nullptr, false)) {
 				return false;
@@ -683,6 +737,7 @@ namespace OSB
 			Backup b;
 			{
 				std::scoped_lock l(g_lock);
+				RestoreSelection();
 				if (g_selected.empty() || !Load(g_selected, b, nullptr, false)) {
 					return {};
 				}
@@ -705,6 +760,7 @@ namespace OSB
 		std::int32_t LoadRestore(std::monostate)
 		{
 			std::scoped_lock l(g_lock);
+			RestoreSelection();
 			g_restoreOrder.clear();
 			if (g_selected.empty() || !Load(g_selected, g_loaded)) {
 				return -1;
@@ -817,6 +873,9 @@ namespace OSB
 		vm->BindNativeMethod(obj, "EndBackup", EndBackup, true, false);
 		vm->BindNativeMethod(obj, "LastBackupReplaced", LastBackupReplaced, true, false);
 		vm->BindNativeMethod(obj, "HasBackup", HasBackup, true, false);
+		vm->BindNativeMethod(obj, "NewFlow", NewFlow, true, false);
+		vm->BindNativeMethod(obj, "CurrentFlow", CurrentFlow, true, false);
+		vm->BindNativeMethod(obj, "SelectOnlyHere", SelectOnlyHere, true, false);
 		vm->BindNativeMethod(obj, "ListBackups", ListBackups, true, false);
 		vm->BindNativeMethod(obj, "FillPicker", FillPicker, true, false);
 		vm->BindNativeMethod(obj, "PickerResult", PickerResult, true, false);
