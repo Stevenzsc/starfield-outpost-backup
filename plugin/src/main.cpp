@@ -1,8 +1,6 @@
 // OSBLanding - land exactly on a stored latitude/longitude.
 //
-// When you land from the star map, the game calls
-//   LandAtLatLon   (Address Library ID 51739)  ->  SetLandingSite (ID 51740)
-// with a site struct whose first two doubles are longitude and latitude in radians.
+// Landing goes through SetLandingSite (Address Library ID 51740) with a site struct whose first two doubles are longitude and latitude in radians.
 // This plugin replaces all four calls to SetLandingSite (game 1.16.244). If the file
 // <Starfield>\OSB_LandTarget.txt exists, its coordinates replace the clicked ones, once:
 //   line 1: <latitude degrees> <longitude degrees>
@@ -18,17 +16,20 @@
 namespace
 {
 	// Every call to SetLandingSite (ID 51740) in game 1.16.244: (function ID, offset of the call)
+	// Observed in game: loading a save that is on a planet goes through LandAtLatLon (restores the saved
+	// landing zone); a star-map click landing goes through StarMapLanding (97897). Only that one is overridden.
 	struct CallSite
 	{
 		std::uint64_t  id;
 		std::ptrdiff_t offset;
 		const char*    name;
+		bool           override;
 	};
 	constexpr CallSite kSites[] = {
-		{ 51739, 0x83, "LandAtLatLon" },
-		{ 97897, 0x1EB, "Land97897" },
-		{ 97898, 0x2D2, "Land97898" },
-		{ 97899, 0x170, "LandAtRef" },
+		{ 51739, 0x83, "LandAtLatLon (save load)", false },
+		{ 97897, 0x1EB, "StarMapLanding", true },
+		{ 97898, 0x2D2, "Land97898", false },
+		{ 97899, 0x170, "LandAtRef", false },
 	};
 
 	using SetLandingSite_t = std::uintptr_t (*)(void* a_manager, void* a_out, std::uint32_t a_planet, double* a_site);
@@ -62,7 +63,7 @@ namespace
 				kSites[I].name, a_planet, a_site[1] * toDeg, a_site[0] * toDeg);
 
 			double lat = 0.0, lon = 0.0;
-			if (ReadTarget(lat, lon)) {
+			if (kSites[I].override && ReadTarget(lat, lon)) {
 				a_site[0] = lon / toDeg;
 				a_site[1] = lat / toDeg;
 				REX::INFO("landing: OVERRIDE -> lat {:.6f} lon {:.6f}", lat, lon);
