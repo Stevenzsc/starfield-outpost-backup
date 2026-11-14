@@ -43,10 +43,31 @@ if ($Mode -eq "Relative") {
   $c = [Math]::Cos($rad); $s = [Math]::Sin($rad)
 }
 
+# Load order written by the OSBLanding plugin at game start. With it, each object is stored as
+# plugin file name + local form ID (OSB.RF / OSB.RRF), so a different load order still restores.
+$loFile = Join-Path $Game "OSB_LoadOrder.txt"
+$full = @{}; $medium = @{}; $small = @{}
+if (Test-Path $loFile) {
+  foreach ($lo in Get-Content $loFile) {
+    $t = $lo -split ' ', 3
+    if ($t.Count -lt 3) { continue }
+    $idx = [Convert]::ToInt32($t[1], 16)
+    switch ($t[0]) { "FULL" { $full[$idx] = $t[2] } "MEDIUM" { $medium[$idx] = $t[2] } "SMALL" { $small[$idx] = $t[2] } }
+  }
+} else {
+  Write-Warning "No $loFile (OSBLanding plugin not installed?). Objects are stored by load-order form ID; a changed load order will break mod objects."
+}
+function Split-FormId([uint32]$hex) {
+  $top = $hex -shr 24
+  if ($top -eq 0xFE) { return @($small[[int](($hex -shr 12) -band 0xFFF)], [int]($hex -band 0xFFF)) }
+  if ($top -eq 0xFD) { return @($medium[[int](($hex -shr 16) -band 0xFF)], [int]($hex -band 0xFFFF)) }
+  return @($full[[int]$top], [int]($hex -band 0xFFFFFF))
+}
+
 # Item lines look like:  [time] OSB-ITEM [Form < (0006AC92)>] x y z ax ay az scale
 # The script cannot call GetFormID() safely in game, so the hex ID is parsed here.
 $cmds = New-Object System.Collections.Generic.List[string]
-$skipped = 0
+$skipped = 0; $byName = 0
 foreach ($l in $lines[($begin + 1)..($end - 1)]) {
   if ($l -notmatch 'OSB-ITEM .*?\(([0-9A-Fa-f]{8})\)>\]\s+(.+)$') { continue }
   $hex = [Convert]::ToUInt32($Matches[1], 16)
@@ -54,15 +75,18 @@ foreach ($l in $lines[($begin + 1)..($end - 1)]) {
   $id = [BitConverter]::ToInt32([BitConverter]::GetBytes($hex), 0)  # Papyrus int is signed 32-bit
   $v = $Matches[2].Trim() -split '\s+'
   if ($v.Count -ne 7) { Write-Warning "Skipping malformed line: $l"; continue }
+  $plugin, $local = Split-FormId $hex
+  $ref = if ($plugin) { $byName++; "`"$plugin`" $local" } else { "$id" }
+  $fn = if ($plugin) { "F" } else { "" }
   if ($Mode -eq "Absolute") {
-    $cmds.Add("cgf `"OSB.R`" $id $($v -join ' ')")
+    $cmds.Add("cgf `"OSB.R$fn`" $ref $($v -join ' ')")
   } else {
     # world offset -> old beacon's local frame (inverse of OSB.RR: heading is clockwise from +Y)
     $dx = (Num $v[0]) - $bx; $dy = (Num $v[1]) - $by; $dz = (Num $v[2]) - $bz
     $lx = $dx * $c - $dy * $s
     $ly = $dx * $s + $dy * $c
     $relaz = (Num $v[5]) - $byaw
-    $cmds.Add("cgf `"OSB.RR`" $id $(Fmt $lx) $(Fmt $ly) $(Fmt $dz) $($v[3]) $($v[4]) $(Fmt $relaz) $($v[6])")
+    $cmds.Add("cgf `"OSB.RR$fn`" $ref $(Fmt $lx) $(Fmt $ly) $(Fmt $dz) $($v[3]) $($v[4]) $(Fmt $relaz) $($v[6])")
   }
 }
 if ($cmds.Count -eq 0) { throw "Backup block has no objects." }
@@ -100,6 +124,7 @@ $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $tag = if ($Name) { "$Name-$stamp" } else { $stamp }
 $copy = Join-Path $backups "OSB_Restore-$tag.txt"
 [IO.File]::WriteAllLines($copy, [string[]]$cmds, [Text.Encoding]::ASCII)
+if (Test-Path $loFile) { Copy-Item $loFile ([IO.Path]::ChangeExtension($copy, ".loadorder.txt")) -Force }
 if ($meta) {
   $json = $meta | ConvertTo-Json
   [IO.File]::WriteAllText([IO.Path]::ChangeExtension($copy, ".json"), $json, [Text.Encoding]::ASCII)
@@ -109,7 +134,7 @@ if ($meta) {
 Write-Host "Source: $($log.FullName)"
 Write-Host "Backup: $header"
 Write-Host "Mode:   $Mode"
-Write-Host "Objects: $($cmds.Count - 1)  (engine forms skipped: $skipped)"
+Write-Host "Objects: $($cmds.Count - 1)  (by plugin name: $byName, engine forms skipped: $skipped)"
 Write-Host "Wrote:  $out"
 Write-Host "Copy:   $copy"
 if ($meta) { Write-Host ("Where:  planet {0}, beacon at lat/lon origin {1:F6}, {2:F6} + ({3:F1}, {4:F1}) m" -f $meta.planet, $meta.originLat, $meta.originLon, $meta.beaconX, $meta.beaconY) }

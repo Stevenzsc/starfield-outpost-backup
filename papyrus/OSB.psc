@@ -109,7 +109,7 @@ EndFunction
 
 ; ---------- restore ----------
 
-; One object. Called once per line of OSB_Restore.txt.
+; One object by load-order form ID (old backups). Called once per line of OSB_Restore.txt.
 Function R(int aiBaseID, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale) global
 	Form base = Game.GetForm(aiBaseID)
 	if base == None
@@ -117,6 +117,41 @@ Function R(int aiBaseID, float afX, float afY, float afZ, float afAX, float afAY
 		Debug.Notification("OSB: base form missing " + aiBaseID)
 		return
 	endif
+	PlaceBase(base, afX, afY, afZ, afAX, afAY, afAZ, afScale)
+EndFunction
+
+; One object by plugin file name + local form ID: independent of the load order.
+Function RF(string asPlugin, int aiLocalID, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale) global
+	Form base = Game.GetFormFromFile(aiLocalID, asPlugin)
+	if base == None
+		Debug.Trace("OSB: RF base not found " + asPlugin + " " + aiLocalID + " (plugin not installed?)")
+		Debug.Notification("OSB: missing " + asPlugin + " " + aiLocalID)
+		return
+	endif
+	PlaceBase(base, afX, afY, afZ, afAX, afAY, afAZ, afScale)
+EndFunction
+
+; Relative-mode version of RF (see RR).
+Function RRF(string asPlugin, int aiLocalID, float afLX, float afLY, float afLZ, float afAX, float afAY, float afRelAZ, float afScale) global
+	Form base = Game.GetFormFromFile(aiLocalID, asPlugin)
+	if base == None
+		Debug.Trace("OSB: RRF base not found " + asPlugin + " " + aiLocalID + " (plugin not installed?)")
+		Debug.Notification("OSB: missing " + asPlugin + " " + aiLocalID)
+		return
+	endif
+	ObjectReference beacon = FindBeacon()
+	if beacon == None
+		Debug.Notification("OSB: no outpost beacon within 300 m")
+		Debug.Trace("OSB: RRF no beacon")
+		return
+	endif
+	float yaw = beacon.GetAngleZ()
+	float c = Math.cos(yaw)
+	float s = Math.sin(yaw)
+	PlaceBase(base, beacon.GetPositionX() + afLX * c + afLY * s, beacon.GetPositionY() - afLX * s + afLY * c, beacon.GetPositionZ() + afLZ, afAX, afAY, afRelAZ + yaw, afScale)
+EndFunction
+
+Function PlaceBase(Form base, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale) global
 	ObjectReference beacon = FindBeacon()
 	Keyword kw = GetWorkshopItemKeyword()
 	if beacon == None || kw == None
@@ -127,7 +162,7 @@ Function R(int aiBaseID, float afX, float afY, float afZ, float afAX, float afAY
 	; spawn disabled, move into place, link to the outpost, then enable so 3D loads at the final spot
 	ObjectReference newRef = beacon.PlaceAtMe(base, 1, true, true, false)
 	if newRef == None
-		Debug.Trace("OSB: R PlaceAtMe failed base=" + base)
+		Debug.Trace("OSB: PlaceAtMe failed base=" + base)
 		return
 	endif
 	newRef.SetPosition(afX, afY, afZ)
@@ -137,7 +172,7 @@ Function R(int aiBaseID, float afX, float afY, float afZ, float afAX, float afAY
 	endif
 	newRef.SetLinkedRef(beacon, kw)
 	newRef.Enable(false)
-	Debug.Trace("OSB: R new=" + newRef + " base=" + base + " workshop=" + newRef.GetWorkshop() + " inBuildableArea=" + newRef.IsWithinBuildableArea(beacon))
+	Debug.Trace("OSB: placed new=" + newRef + " base=" + base + " workshop=" + newRef.GetWorkshop() + " inBuildableArea=" + newRef.IsWithinBuildableArea(beacon))
 EndFunction
 
 ; One object, placed relative to the beacon of the outpost the player is in.
