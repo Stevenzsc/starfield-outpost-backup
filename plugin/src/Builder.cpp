@@ -44,6 +44,18 @@ namespace OSB::Builder
 		std::atomic<bool> g_forcing{ false };
 		std::atomic<bool> g_forceAll{ false };
 		std::atomic<bool> g_logAim{ false };
+		std::atomic<std::uint32_t> g_placed{ 0 };    // Workshop::ItemPlacedEvent count
+		constexpr float kSmallObject = 20.0f;        // m^2 footprint: furniture and decorations
+
+		class PlacedSink : public RE::BSTEventSink<RE::Workshop::ItemPlacedEvent>
+		{
+		public:
+			RE::BSEventNotifyControl ProcessEvent(const RE::Workshop::ItemPlacedEvent&, RE::BSTEventSource<RE::Workshop::ItemPlacedEvent>*) override
+			{
+				++g_placed;
+				return RE::BSEventNotifyControl::kContinue;
+			}
+		};
 		std::mutex g_targetLock;
 		float g_tx = 0, g_ty = 0, g_tz = 0, g_tyaw = 0;
 
@@ -238,9 +250,17 @@ namespace OSB::Builder
 				REX::WARN("builder: {} ({:08X}) no preview", a_job.name, a_job.formID);
 				return false;
 			}
-			void* item = CurrentItem();
+			// small objects whose preview is not at the saved height have no floor yet (their hab is not
+			// built): leave them for a later pass, except on the last one
+			if (!g_forceAll.load() && a_job.size < kSmallObject && std::abs(p[2] - a_job.z) > 1.0f) {
+				REX::INFO("builder: {} ({:08X}, size {:.0f}) at height {:.2f}, saved {:.2f}: later", a_job.name, a_job.formID, a_job.size, p[2], a_job.z);
+				return false;
+			}
+			const auto placedBefore = g_placed.load();
 			PostCommit();
-			const bool committed = WaitFor([&] { return CurrentItem() != item; }, 1500);
+			// the engine needs up to a few seconds for a hab (foundations); wait for the placed event
+			const bool committed = WaitFor([&] { return g_placed.load() != placedBefore; }, 15000);
+			std::this_thread::sleep_for(std::chrono::milliseconds(300));
 			REX::INFO("builder: {} ({:08X}, size {:.0f}) at {:.2f} {:.2f} {:.2f} (target {:.2f} {:.2f} {:.2f}) status {} -> {}", a_job.name, a_job.formID, a_job.size,
 				p[0], p[1], p[2], a_job.x, a_job.y, a_job.z, status, committed ? "built" : "not built");
 			return committed;
@@ -308,6 +328,15 @@ namespace OSB::Builder
 			REX::ERROR("builder: hooks missing");
 			g_running = false;
 			return false;
+		}
+		static bool sinkRegistered = false;
+		if (!sinkRegistered) {
+			using src_t = RE::BSTEventSource<RE::Workshop::ItemPlacedEvent>* (*)();
+			if (auto* src = REL::Relocation<src_t>{ REL::ID(73963) }()) {   // +0xF4F840
+				static PlacedSink sink;
+				src->RegisterSink(&sink);
+				sinkRegistered = true;
+			}
 		}
 		g_stop = false;
 		g_done = 0;
