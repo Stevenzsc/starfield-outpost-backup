@@ -166,14 +166,22 @@ EndFunction
 
 ; Print planet, landing-zone position of the player and of the nearest outpost beacon.
 Function Where() global
+	; each part is traced on its own: some native calls can hang (see GetFormID), so a hang
+	; in a later part must not hide the earlier results
 	Actor player = Game.GetPlayer()
-	string msg = "OSB: Where planet=" + player.GetCurrentPlanet() + " player=(" + player.GetPositionX() + "," + player.GetPositionY() + "," + player.GetPositionZ() + ") heading=" + player.GetAngleZ()
+	Debug.Trace("OSB: Where player=(" + player.GetPositionX() + "," + player.GetPositionY() + "," + player.GetPositionZ() + ") heading=" + player.GetAngleZ())
+	Debug.Notification("OSB: you are at " + Math.Floor(player.GetPositionX()) + ", " + Math.Floor(player.GetPositionY()) + ", " + Math.Floor(player.GetPositionZ()))
 	ObjectReference beacon = FindBeacon()
 	if beacon
-		msg += " beacon=" + beacon + " pos=(" + beacon.GetPositionX() + "," + beacon.GetPositionY() + "," + beacon.GetPositionZ() + ") yaw=" + beacon.GetAngleZ()
+		Debug.Trace("OSB: Where beacon=" + beacon + " pos=(" + beacon.GetPositionX() + "," + beacon.GetPositionY() + "," + beacon.GetPositionZ() + ") yaw=" + beacon.GetAngleZ())
 	endif
-	Debug.Trace(msg)
-	Debug.Notification("OSB: you are at " + Math.Floor(player.GetPositionX()) + ", " + Math.Floor(player.GetPositionY()) + ", " + Math.Floor(player.GetPositionZ()))
+	Debug.Trace("OSB: Where getting ship")
+	ObjectReference ship = Game.GetPlayerHomeSpaceShip()
+	Debug.Trace("OSB: Where ship=" + ship)
+	if ship
+		Debug.Trace("OSB: Where shippos=(" + ship.GetPositionX() + "," + ship.GetPositionY() + "," + ship.GetPositionZ() + ")")
+		Debug.Notification("OSB: ship at " + Math.Floor(ship.GetPositionX()) + ", " + Math.Floor(ship.GetPositionY()))
+	endif
 EndFunction
 
 ; atan2 in degrees, heading convention: 0 = +Y, clockwise positive
