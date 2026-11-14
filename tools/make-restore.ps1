@@ -67,7 +67,10 @@ function Split-FormId([uint32]$hex) {
 # Item lines look like:  [time] OSB-ITEM [Form < (0006AC92)>] x y z ax ay az scale
 # The script cannot call GetFormID() safely in game, so the hex ID is parsed here.
 $cmds = New-Object System.Collections.Generic.List[string]
-$skipped = 0; $byName = 0
+$skipped = 0; $byName = 0; $attached = 0
+# Multi-part objects (e.g. extractor + its foundation) have no link the script can read; their parts sit at
+# exactly the same position. The first item at a position is the parent; later ones are attached to it (OSB.RFA).
+$groups = @()   # each: @{ x; y; z; plugin; local }
 foreach ($l in $lines[($begin + 1)..($end - 1)]) {
   if ($l -notmatch 'OSB-ITEM .*?\(([0-9A-Fa-f]{8})\)>\]\s+(.+)$') { continue }
   $hex = [Convert]::ToUInt32($Matches[1], 16)
@@ -78,9 +81,18 @@ foreach ($l in $lines[($begin + 1)..($end - 1)]) {
   $plugin, $local = Split-FormId $hex
   $ref = if ($plugin) { $byName++; "`"$plugin`" $local" } else { "$id" }
   $fn = if ($plugin) { "F" } else { "" }
+  $px = Num $v[0]; $py = Num $v[1]; $pz = Num $v[2]
+  $parent = $groups | Where-Object { [Math]::Abs($_.x - $px) -lt 0.01 -and [Math]::Abs($_.y - $py) -lt 0.01 -and [Math]::Abs($_.z - $pz) -lt 0.2 } | Select-Object -First 1
+  if (-not $parent -and $plugin) { $groups += @{ x = $px; y = $py; z = $pz; plugin = $plugin; local = $local } }
   if ($Mode -eq "Absolute") {
-    $cmds.Add("cgf `"OSB.R$fn`" $ref $($v -join ' ')")
+    if ($parent -and $plugin) {
+      $attached++
+      $cmds.Add("cgf `"OSB.RFA`" $ref $($v -join ' ') `"$($parent.plugin)`" $($parent.local) $(Fmt $parent.x) $(Fmt $parent.y) $(Fmt $parent.z)")
+    } else {
+      $cmds.Add("cgf `"OSB.R$fn`" $ref $($v -join ' ')")
+    }
   } else {
+    if ($parent) { Write-Warning "Relative mode does not re-attach parts yet; use -Mode Absolute for multi-part objects." }
     # world offset -> old beacon's local frame (inverse of OSB.RR: heading is clockwise from +Y)
     $dx = (Num $v[0]) - $bx; $dy = (Num $v[1]) - $by; $dz = (Num $v[2]) - $bz
     $lx = $dx * $c - $dy * $s
@@ -134,7 +146,7 @@ if ($meta) {
 Write-Host "Source: $($log.FullName)"
 Write-Host "Backup: $header"
 Write-Host "Mode:   $Mode"
-Write-Host "Objects: $($cmds.Count - 1)  (by plugin name: $byName, engine forms skipped: $skipped)"
+Write-Host "Objects: $($cmds.Count - 1)  (by plugin name: $byName, attached parts: $attached, engine forms skipped: $skipped)"
 Write-Host "Wrote:  $out"
 Write-Host "Copy:   $copy"
 if ($meta) { Write-Host ("Where:  planet {0}, beacon at lat/lon origin {1:F6}, {2:F6} + ({3:F1}, {4:F1}) m" -f $meta.planet, $meta.originLat, $meta.originLon, $meta.beaconX, $meta.beaconY) }

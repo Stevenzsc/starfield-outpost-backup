@@ -151,19 +151,38 @@ Function RRF(string asPlugin, int aiLocalID, float afLX, float afLY, float afLZ,
 	PlaceBase(base, beacon.GetPositionX() + afLX * c + afLY * s, beacon.GetPositionY() - afLX * s + afLY * c, beacon.GetPositionZ() + afLZ, afAX, afAY, afRelAZ + yaw, afScale)
 EndFunction
 
-Function PlaceBase(Form base, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale) global
+; A part of a multi-part object: placed like RF, then attached to its parent, which was placed by the
+; previous line at exactly (afPX, afPY, afPZ). Found by base + position, since cgf calls share no state.
+Function RFA(string asPlugin, int aiLocalID, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale, string asParentPlugin, int aiParentLocalID, float afPX, float afPY, float afPZ) global
+	Form base = Game.GetFormFromFile(aiLocalID, asPlugin)
+	Form parentBase = Game.GetFormFromFile(aiParentLocalID, asParentPlugin)
+	if base == None || parentBase == None
+		Debug.Trace("OSB: RFA base not found " + asPlugin + " " + aiLocalID + " / parent " + asParentPlugin + " " + aiParentLocalID)
+		return
+	endif
+	ObjectReference child = PlaceBase(base, afX, afY, afZ, afAX, afAY, afAZ, afScale)
+	ObjectReference parent = Game.FindClosestReferenceOfType(parentBase, afPX, afPY, afPZ, 0.05)
+	if child && parent
+		child.AttachTo(parent)
+		Debug.Trace("OSB: RFA attached " + child + " to " + parent)
+	else
+		Debug.Trace("OSB: RFA could not attach child=" + child + " parent=" + parent)
+	endif
+EndFunction
+
+ObjectReference Function PlaceBase(Form base, float afX, float afY, float afZ, float afAX, float afAY, float afAZ, float afScale) global
 	ObjectReference beacon = FindBeacon()
 	Keyword kw = GetWorkshopItemKeyword()
 	if beacon == None || kw == None
 		Debug.Notification("OSB: no outpost beacon within 300 m")
 		Debug.Trace("OSB: R no beacon / keyword")
-		return
+		return None
 	endif
 	; spawn disabled, move into place, link to the outpost, then enable so 3D loads at the final spot
 	ObjectReference newRef = beacon.PlaceAtMe(base, 1, true, true, false)
 	if newRef == None
 		Debug.Trace("OSB: PlaceAtMe failed base=" + base)
-		return
+		return None
 	endif
 	newRef.SetPosition(afX, afY, afZ)
 	newRef.SetAngle(afAX, afAY, afAZ)
@@ -173,6 +192,7 @@ Function PlaceBase(Form base, float afX, float afY, float afZ, float afAX, float
 	newRef.SetLinkedRef(beacon, kw)
 	newRef.Enable(false)
 	Debug.Trace("OSB: placed new=" + newRef + " base=" + base + " workshop=" + newRef.GetWorkshop() + " inBuildableArea=" + newRef.IsWithinBuildableArea(beacon))
+	return newRef
 EndFunction
 
 ; One object, placed relative to the beacon of the outpost the player is in.
@@ -193,6 +213,41 @@ Function RR(int aiBaseID, float afLX, float afLY, float afLZ, float afAX, float 
 	float wy = beacon.GetPositionY() - afLX * s + afLY * c
 	float wz = beacon.GetPositionZ() + afLZ
 	R(aiBaseID, wx, wy, wz, afAX, afAY, afRelAZ + yaw, afScale)
+EndFunction
+
+; ---------- diagnostics ----------
+
+; How are multi-part objects grouped? For every outpost ref: base type and its links.
+; Never calls GetFormID (hangs on some forms).
+Function Inspect(int aiBeaconID = 0) global
+	ObjectReference beacon
+	if aiBeaconID == 0
+		beacon = FindBeacon()   ; the outpost you are standing in
+	else
+		beacon = GetRef(aiBeaconID)
+	endif
+	Keyword kw = GetWorkshopItemKeyword()
+	if beacon == None || kw == None
+		return
+	endif
+	Keyword kStacked = Game.GetFormFromFile(0x001C5EDD, "Starfield.esm") as Keyword   ; WorkshopStackedItemParentKEYWORD
+	Keyword kPrim = Game.GetFormFromFile(0x000B91E6, "Starfield.esm") as Keyword      ; WorkshopLinkedPrimitive
+	Keyword kCenter = Game.GetFormFromFile(0x00038C0B, "Starfield.esm") as Keyword    ; WorkshopLinkCenter
+	ObjectReference[] refs = beacon.GetRefsLinkedToMe(kw)
+	int i = 0
+	while refs && i < refs.Length
+		ObjectReference r = refs[i]
+		Form base = r.GetBaseObject()
+		bool isPack = (base as PackIn) != None
+		ObjectReference[] toMe = r.GetRefsLinkedToMe(None)
+		int nToMe = 0
+		if toMe
+			nToMe = toMe.Length
+		endif
+		Debug.Trace("OSB: Inspect #" + i + " ref=" + r + " base=" + base + " packin=" + isPack + " pos=(" + r.GetPositionX() + "," + r.GetPositionY() + "," + r.GetPositionZ() + ") link(None)=" + r.GetLinkedRef(None) + " link(Stacked)=" + r.GetLinkedRef(kStacked) + " link(Prim)=" + r.GetLinkedRef(kPrim) + " link(Center)=" + r.GetLinkedRef(kCenter) + " linkedToMe(None)=" + nToMe)
+		i += 1
+	endwhile
+	Debug.Notification("OSB: inspected " + i + " refs, see Papyrus log")
 EndFunction
 
 ; ---------- guidance ----------
