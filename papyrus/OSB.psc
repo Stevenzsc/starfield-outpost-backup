@@ -95,7 +95,12 @@ Function Backup(int aiBeaconID) global
 				Debug.Trace("OSB: Backup skip (on beacon) ref=" + r + " base=" + base)
 			else
 				; base prints as "[Form < (0006AC92)>]"; make-restore.ps1 parses the hex ID
-				string line = "OSB-ITEM " + base + " " + r.GetPositionX() + " " + r.GetPositionY() + " " + r.GetPositionZ() + " " + r.GetAngleX() + " " + r.GetAngleY() + " " + r.GetAngleZ() + " " + r.GetScale()
+				; last field: 1 if the base is a PackIn (its parts spawn by themselves when it is placed)
+				int packFlag = 0
+				if base as PackIn
+					packFlag = 1
+				endif
+				string line = "OSB-ITEM " + base + " " + r.GetPositionX() + " " + r.GetPositionY() + " " + r.GetPositionZ() + " " + r.GetAngleX() + " " + r.GetAngleY() + " " + r.GetAngleZ() + " " + r.GetScale() + " " + packFlag
 				Debug.TraceUser(log, line)
 				Debug.Trace("OSB: Backup keep ref=" + r + " base=" + base)
 				saved += 1

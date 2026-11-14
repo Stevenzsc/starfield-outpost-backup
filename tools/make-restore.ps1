@@ -68,23 +68,28 @@ function Split-FormId([uint32]$hex) {
 # Item lines look like:  [time] OSB-ITEM [Form < (0006AC92)>] x y z ax ay az scale
 # The script cannot call GetFormID() safely in game, so the hex ID is parsed here.
 $cmds = New-Object System.Collections.Generic.List[string]
-$skipped = 0; $byName = 0; $attached = 0
-# Multi-part objects (e.g. extractor + its foundation) have no link the script can read; their parts sit at
-# exactly the same position. The first item at a position is the parent; later ones are attached to it (OSB.RFA).
-$groups = @()   # each: @{ x; y; z; plugin; local }
+$skipped = 0; $byName = 0; $attached = 0; $packParts = 0
+# Multi-part objects have no link the script can read; their parts sit at exactly the same position.
+# - parent is a PackIn: placing it spawns its parts again, so co-located parts are skipped (tested in game:
+#   BmxOutpost E41 alone restores the whole object).
+# - otherwise (e.g. extractor + build-generated foundation): parts are restored as separate objects.
+$groups = @()   # each: @{ x; y; z; plugin; local; pack }
 foreach ($l in $lines[($begin + 1)..($end - 1)]) {
   if ($l -notmatch 'OSB-ITEM .*?\(([0-9A-Fa-f]{8})\)>\]\s+(.+)$') { continue }
   $hex = [Convert]::ToUInt32($Matches[1], 16)
   if ($hex -lt 0x800) { $skipped++; continue }                       # engine-reserved forms
   $id = [BitConverter]::ToInt32([BitConverter]::GetBytes($hex), 0)  # Papyrus int is signed 32-bit
   $v = $Matches[2].Trim() -split '\s+'
+  $isPack = $false
+  if ($v.Count -eq 8) { $isPack = $v[7] -eq "1"; $v = $v[0..6] }      # newer backups carry a PackIn flag
   if ($v.Count -ne 7) { Write-Warning "Skipping malformed line: $l"; continue }
   $plugin, $local = Split-FormId $hex
-  $ref = if ($plugin) { $byName++; "`"$plugin`" $local" } else { "$id" }
-  $fn = if ($plugin) { "F" } else { "" }
   $px = Num $v[0]; $py = Num $v[1]; $pz = Num $v[2]
   $parent = $groups | Where-Object { [Math]::Abs($_.x - $px) -lt 0.01 -and [Math]::Abs($_.y - $py) -lt 0.01 -and [Math]::Abs($_.z - $pz) -lt 0.2 } | Select-Object -First 1
-  if (-not $parent -and $plugin) { $groups += @{ x = $px; y = $py; z = $pz; plugin = $plugin; local = $local } }
+  if ($parent -and $parent.pack) { $packParts++; continue }
+  if (-not $parent) { $groups += @{ x = $px; y = $py; z = $pz; plugin = $plugin; local = $local; pack = $isPack } }
+  $ref = if ($plugin) { $byName++; "`"$plugin`" $local" } else { "$id" }
+  $fn = if ($plugin) { "F" } else { "" }
   if ($Mode -eq "Absolute") {
     $plain = (Num $v[3]) -eq 0 -and (Num $v[4]) -eq 0 -and (Num $v[6]) -eq 1
     # Off by default: in game, AttachTo made the restored object impossible to select or scrap.
@@ -150,7 +155,7 @@ if ($meta) {
 Write-Host "Source: $($log.FullName)"
 Write-Host "Backup: $header"
 Write-Host "Mode:   $Mode"
-Write-Host "Objects: $($cmds.Count - 1)  (by plugin name: $byName, attached parts: $attached, engine forms skipped: $skipped)"
+Write-Host "Objects: $($cmds.Count - 1)  (by plugin name: $byName, PackIn parts skipped: $packParts, attached parts: $attached, engine forms skipped: $skipped)"
 Write-Host "Wrote:  $out"
 Write-Host "Copy:   $copy"
 if ($meta) { Write-Host ("Where:  planet {0}, beacon at lat/lon origin {1:F6}, {2:F6} + ({3:F1}, {4:F1}) m" -f $meta.planet, $meta.originLat, $meta.originLon, $meta.beaconX, $meta.beaconY) }
