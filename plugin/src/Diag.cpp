@@ -6,6 +6,8 @@
 
 #include "Diag.h"
 
+#include <thread>
+
 extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void**, unsigned long*);
 extern "C" __declspec(dllimport) int __stdcall VirtualProtect(void*, std::size_t, unsigned long, unsigned long*);
 extern "C" __declspec(dllimport) int __stdcall IsBadReadPtr(const void*, std::uintptr_t);
@@ -154,6 +156,94 @@ namespace OSB::Diag
 				return RE::BSEventNotifyControl::kContinue;
 			}
 		};
+
+		// Workshop::PlacementStatusEvent: layout unknown, log the first 0x30 bytes when they change.
+		struct PlacementStatusEvent
+		{
+			std::byte raw[0x30];
+		};
+
+		class PlacementStatusSink : public RE::BSTEventSink<PlacementStatusEvent>
+		{
+		public:
+			RE::BSEventNotifyControl ProcessEvent(const PlacementStatusEvent& a_event, RE::BSTEventSource<PlacementStatusEvent>*) override
+			{
+				const auto addr = reinterpret_cast<std::uintptr_t>(&a_event);
+				if (!Readable(addr, sizeof(a_event))) {
+					return RE::BSEventNotifyControl::kContinue;
+				}
+				std::string hex;
+				for (std::size_t i = 0; i < sizeof(a_event.raw); i += 4) {
+					hex += std::format(" {:08X}", *reinterpret_cast<const std::uint32_t*>(a_event.raw + i));
+				}
+				const auto stack = Stack();
+				if (hex != last || stack != lastStack) {
+					REX::INFO("diag: PlacementStatus{}", hex);
+					REX::INFO("diag:   stack{}", stack);
+					last = hex;
+					lastStack = stack;
+				}
+				return RE::BSEventNotifyControl::kContinue;
+			}
+
+		private:
+			std::string last, lastStack;
+		};
+
+		// Background sampler: while the engine holds an item, log engine/item qwords that changed and the
+		// positions of the first preview refs, every 0.5 s. Moving the cursor shows where the transform lives.
+		constexpr std::uintptr_t kEngineRva = 0x5F5D2E0;
+
+		void Sampler()
+		{
+			std::vector<std::uint64_t> prevEngine(0x700 / 8), prevItem(0xF0 / 8);
+			std::uintptr_t prevItemAddr = 0;
+			for (;;) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(500));
+				const auto engine = ImageBase() + kEngineRva;
+				if (!Readable(engine, 0x700)) {
+					continue;
+				}
+				const auto item = *reinterpret_cast<std::uintptr_t*>(engine + 0x268);
+				if (!item || !Readable(item, 0xF0)) {
+					prevItemAddr = 0;
+					continue;
+				}
+				std::string changed;
+				for (std::size_t i = 0; i < prevEngine.size(); ++i) {
+					const auto q = *reinterpret_cast<std::uint64_t*>(engine + i * 8);
+					if (q != prevEngine[i] && prevItemAddr == item) {
+						const float f0 = *reinterpret_cast<float*>(engine + i * 8), f1 = *reinterpret_cast<float*>(engine + i * 8 + 4);
+						changed += std::format(" e+{:X}={:.2f},{:.2f}", i * 8, f0, f1);
+					}
+					prevEngine[i] = q;
+				}
+				for (std::size_t i = 0; i < prevItem.size(); ++i) {
+					const auto q = *reinterpret_cast<std::uint64_t*>(item + i * 8);
+					if (q != prevItem[i] && prevItemAddr == item) {
+						changed += std::format(" i+{:X}={:X}", i * 8, q);
+					}
+					prevItem[i] = q;
+				}
+				// preview refs: item+0x08 = {u32 size, u32 cap}, item+0x10 = data
+				const auto n = *reinterpret_cast<std::uint32_t*>(item + 0x08);
+				const auto data = *reinterpret_cast<std::uintptr_t*>(item + 0x10);
+				std::string refs;
+				if (n && n < 4096 && Readable(data, 8 * std::min<std::uint32_t>(n, 3))) {
+					for (std::uint32_t k = 0; k < std::min<std::uint32_t>(n, 3); ++k) {
+						const auto p = *reinterpret_cast<std::uintptr_t*>(data + k * 8);
+						refs += " [" + Describe(p) + "]";
+					}
+				}
+				if (prevItemAddr != item) {
+					REX::INFO("diag: sampler: new item {:X} refs {}{}", item, n, refs);
+				} else if (!changed.empty()) {
+					REX::INFO("diag: sampler:{}", changed);
+					REX::INFO("diag: sampler: refs {}{}", n, refs);
+				}
+				prevItemAddr = item;
+			}
+		}
 	}
 
 	void Install(const std::filesystem::path& a_flagFile)
@@ -177,6 +267,14 @@ namespace OSB::Diag
 		HookCommit<0>();
 		HookCommit<1>();
 		HookCommit<2>();
+
+		using StatusSrc = RE::BSTEventSource<PlacementStatusEvent>* (*)();
+		auto* status = REL::Relocation<StatusSrc>{ REL::ID(73955) }();   // +0xF4F340
+		static PlacementStatusSink statusSink;
+		if (status) {
+			status->RegisterSink(&statusSink);
+		}
+		std::thread(Sampler).detach();
 		REX::INFO("diag: workshop placement logging on");
 	}
 }
