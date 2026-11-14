@@ -39,6 +39,7 @@ namespace OSB::Builder
 		constexpr std::uint8_t kStatusOk = 2;
 
 		std::atomic<bool> g_forcing{ false };
+		std::atomic<bool> g_forceAll{ false };
 		std::mutex g_targetLock;
 		float g_tx = 0, g_ty = 0, g_tz = 0, g_tyaw = 0;
 
@@ -95,7 +96,7 @@ namespace OSB::Builder
 			const auto r = g_update(a_engine, a_2, a_3, a_4);
 			if (g_forcing.load()) {
 				auto& status = *reinterpret_cast<std::uint8_t*>(reinterpret_cast<std::uintptr_t>(a_engine) + kStatus);
-				if (status == 4) {   // blocked by overlap: build anyway
+				if (status == 4 || (g_forceAll.load() && status != kStatusOk)) {   // overlap (or anything, last pass): build anyway
 					status = kStatusOk;
 				}
 			}
@@ -158,56 +159,81 @@ namespace OSB::Builder
 			return a_cond();
 		}
 
+		// One object: preview at the target, commit. True if the engine committed it.
+		bool BuildOne(const Job& a_job, void* a_entry)
+		{
+			{
+				std::scoped_lock l(g_targetLock);
+				g_tx = a_job.x;
+				g_ty = a_job.y;
+				g_tz = a_job.z;
+				g_tyaw = a_job.yawDeg * std::numbers::pi_v<float> / 180.0f;
+			}
+			void* before = CurrentItem();
+			PostNewItem(a_entry);
+			const bool got = WaitFor([&] { return CurrentItem() && CurrentItem() != before; }, 3000);
+			if (got) {
+				WaitFor([&] {
+					const auto& p = Field<float[3]>(kPreviewPos);
+					return std::abs(p[0] - a_job.x) < 0.5f && std::abs(p[1] - a_job.y) < 0.5f;
+				}, 2000);
+				std::this_thread::sleep_for(std::chrono::milliseconds(300));   // 3D load and snapping settle
+			}
+			const auto& p = Field<float[3]>(kPreviewPos);
+			const auto status = Field<std::uint8_t>(kStatus);
+			if (!got) {
+				REX::WARN("builder: {} ({:08X}) no preview", a_job.name, a_job.formID);
+				return false;
+			}
+			void* item = CurrentItem();
+			PostCommit();
+			const bool committed = WaitFor([&] { return CurrentItem() != item; }, 1500);
+			REX::INFO("builder: {} ({:08X}) at {:.2f} {:.2f} {:.2f} (target {:.2f} {:.2f} {:.2f}) status {} -> {}", a_job.name, a_job.formID,
+				p[0], p[1], p[2], a_job.x, a_job.y, a_job.z, status, committed ? "built" : "not built");
+			return committed;
+		}
+
+		// Passes: objects that the engine refuses (e.g. furniture before its hab exists) are retried after the
+		// others; the last pass forces every placement status to OK.
+		constexpr int kPasses = 3;
+
 		void Worker(std::vector<Job> a_jobs)
 		{
 			REX::INFO("builder: start, {} objects", a_jobs.size());
+			std::vector<std::pair<const Job*, void*>> todo;
 			for (const auto& job : a_jobs) {
-				if (g_stop.load()) {
-					break;
-				}
-				auto* entry = LookupEntry(job.formID);
-				if (!entry) {
+				if (auto* entry = LookupEntry(job.formID)) {
+					todo.emplace_back(&job, entry);
+				} else {
 					REX::WARN("builder: {} ({:08X}) is not in the build menu; skipped", job.name, job.formID);
 					++g_failed;
 					++g_done;
-					continue;
 				}
-				{
-					std::scoped_lock l(g_targetLock);
-					g_tx = job.x;
-					g_ty = job.y;
-					g_tz = job.z;
-					g_tyaw = job.yawDeg * std::numbers::pi_v<float> / 180.0f;
+			}
+			g_forcing = true;
+			for (int pass = 1; pass <= kPasses && !todo.empty() && !g_stop.load(); ++pass) {
+				g_forceAll = pass == kPasses;
+				REX::INFO("builder: pass {} ({} objects{})", pass, todo.size(), g_forceAll.load() ? ", forcing all checks" : "");
+				std::vector<std::pair<const Job*, void*>> retry;
+				for (const auto& [job, entry] : todo) {
+					if (g_stop.load()) {
+						break;
+					}
+					if (BuildOne(*job, entry)) {
+						++g_built;
+						++g_done;
+					} else {
+						retry.emplace_back(job, entry);
+					}
 				}
-				void* before = CurrentItem();
-				g_forcing = true;
-				PostNewItem(entry);
-				// wait for a new preview item, then for the preview to reach the target
-				const bool got = WaitFor([&] { return CurrentItem() && CurrentItem() != before; }, 5000);
-				const bool there = got && WaitFor([&] {
-					const auto& p = Field<float[3]>(kPreviewPos);
-					return std::abs(p[0] - job.x) < 0.5f && std::abs(p[1] - job.y) < 0.5f;
-				}, 5000);
-				std::this_thread::sleep_for(std::chrono::milliseconds(400));   // let the 3D load and snapping settle
-				const auto& p = Field<float[3]>(kPreviewPos);
-				REX::INFO("builder: {} ({:08X}) preview {} at {:.2f} {:.2f} {:.2f} (target {:.2f} {:.2f} {:.2f}) status {}", job.name, job.formID,
-					got ? "ready" : "MISSING", p[0], p[1], p[2], job.x, job.y, job.z, Field<std::uint8_t>(kStatus));
-				if (!got) {
-					++g_failed;
-					++g_done;
-					continue;
-				}
-				void* item = CurrentItem();
-				PostCommit();
-				const bool committed = WaitFor([&] { return CurrentItem() != item; }, 5000);
-				if (committed && there) {
-					++g_built;
-				} else {
-					REX::WARN("builder: {} commit {}", job.name, committed ? "done but preview was off target" : "did not happen");
-					committed ? ++g_built : ++g_failed;
-				}
+				todo = std::move(retry);
+			}
+			for (const auto& [job, entry] : todo) {
+				REX::WARN("builder: {} ({:08X}) could not be built", job->name, job->formID);
+				++g_failed;
 				++g_done;
 			}
+			g_forceAll = false;
 			g_forcing = false;
 			PostCancel();   // drop the last preview the engine re-offers after a commit
 			REX::INFO("builder: done, built {}, failed {}, of {}", g_built.load(), g_failed.load(), g_total.load());
