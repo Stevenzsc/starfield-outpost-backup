@@ -20,6 +20,7 @@ float Property kMaxGuideMeters = 2000.0 AutoReadOnly Hidden      ; farther than 
 float Property kBeaconNearMeters = 50.0 AutoReadOnly Hidden      ; a beacon this close to the saved spot counts
 float Property kBeaconToleranceMeters = 25.0 AutoReadOnly Hidden ; farther than this: ask before restoring
 int Property kPageSize = 8 AutoReadOnly Hidden
+float Property kProgressSeconds = 3.0 AutoReadOnly Hidden
 float Property kPollSeconds = 3.0 AutoReadOnly Hidden
 float Property kArriveTimeout = 7200.0 AutoReadOnly Hidden       ; real seconds to wait for the landing
 float Property kBeaconTimeout = 1800.0 AutoReadOnly Hidden       ; real seconds to wait for the beacon
@@ -184,12 +185,21 @@ Function DoBackup()
 	endif
 	Notify("backing up, please wait...")
 	ObjectReference[] refs = beacon.GetRefsLinkedToMe(kw)
+	int total = 0
+	if refs
+		total = refs.Length
+	endif
+	float lastShown = Utility.GetCurrentRealTime()
 	int i = 0
-	while refs && i < refs.Length
+	while i < total
+		if Utility.GetCurrentRealTime() - lastShown >= kProgressSeconds
+			lastShown = Utility.GetCurrentRealTime()
+			Notify("backing up... " + (i * 100 / total) + "% (" + i + " of " + total + ")")
+		endif
 		ObjectReference r = refs[i]
 		if r && r != beacon
 			Form base = r.GetBaseObject()
-			if !OSB.IsSkippedBase(base) && !OnBeacon(r, beacon)
+			if OSB_Native.IsBuildable(base) && !OSB.IsSkippedBase(base) && !OnBeacon(r, beacon)
 				OSB_Native.AddItem(base, r.GetPositionX(), r.GetPositionY(), r.GetPositionZ(), r.GetAngleX(), r.GetAngleY(), r.GetAngleZ(), r.GetScale(), (base as PackIn) != None)
 			endif
 		endif
@@ -415,16 +425,18 @@ Function RestoreAt(ObjectReference akBeacon, float[] akSpot)
 	Notify("restoring " + n + " objects...")
 	int placed = 0
 	int missing = 0
+	float lastShown = Utility.GetCurrentRealTime()
 	int i = 0
 	while i < n
+		if Utility.GetCurrentRealTime() - lastShown >= kProgressSeconds
+			lastShown = Utility.GetCurrentRealTime()
+			Notify("restoring... " + (i * 100 / n) + "% (" + i + " of " + n + ")")
+		endif
 		Form base = OSB_Native.GetRestoreForm(i)
 		float[] t = OSB_Native.GetRestoreXform(i)
 		if base && t && t.Length >= 7
 			if OSB.PlaceBase(base, t[0], t[1], t[2], t[3], t[4], t[5], t[6])
 				placed += 1
-			endif
-			if placed % 50 == 0
-				Notify("restored " + placed + " of " + n + "...")
 			endif
 		else
 			missing += 1

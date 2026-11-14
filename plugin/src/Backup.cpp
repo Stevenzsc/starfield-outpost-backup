@@ -202,12 +202,28 @@ namespace OSB
 				if (!dh) {
 					return;
 				}
-				auto& arr = dh->formArrays[std::to_underlying(RE::FormType::kCOBJ)];
-				for (auto& f : arr.formArray) {
-					auto* cobj = f ? f->As<RE::BGSConstructibleObject>() : nullptr;
-					if (cobj && cobj->createdObject) {
-						set.insert(cobj->createdObject->GetFormID());
+				// Find the COBJ array by RTTI: the FormType index in the headers does not match this game version.
+				constexpr std::size_t kArrays = std::extent_v<decltype(RE::TESDataHandler::formArrays)>;
+				for (std::size_t i = 0; i < kArrays; ++i) {
+					auto& arr = dh->formArrays[i].formArray;
+					RE::TESForm* first = nullptr;
+					for (auto& f : arr) {
+						if (f) {
+							first = f.get();
+							break;
+						}
 					}
+					if (!first || !starfield_cast<RE::BGSConstructibleObject*>(first)) {
+						continue;
+					}
+					for (auto& f : arr) {
+						auto* cobj = f ? starfield_cast<RE::BGSConstructibleObject*>(f.get()) : nullptr;
+						if (cobj && cobj->createdObject) {
+							set.insert(cobj->createdObject->GetFormID());
+						}
+					}
+					REX::INFO("buildable: COBJ array {} ({} recipes; header index {})", i, arr.size(), std::to_underlying(RE::FormType::kCOBJ));
+					break;
 				}
 				REX::INFO("buildable: {} objects have a workshop recipe", set.size());
 			});
