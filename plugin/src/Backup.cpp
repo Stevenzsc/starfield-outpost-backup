@@ -1017,7 +1017,13 @@ namespace OSB
 					if (!form) {
 						continue;
 					}
-					jobs.push_back({ form->GetFormID(), it.x, it.y, it.z, it.az, std::format("{} {:X}", it.plugin, it.local) });
+					// footprint from the base bounds (TESBoundObject +0x50 min, +0x5C max)
+					const auto* b = reinterpret_cast<const float*>(reinterpret_cast<std::uintptr_t>(form) + 0x50);
+					float size = (b[3] - b[0]) * (b[4] - b[1]);
+					if (!std::isfinite(size) || size < 0 || size > 1e6f) {
+						size = 0;
+					}
+					jobs.push_back({ form->GetFormID(), it.x, it.y, it.z, it.az, std::format("{} {:X}", it.plugin, it.local), size });
 				}
 			}
 			return !jobs.empty() && Builder::Start(std::move(jobs));

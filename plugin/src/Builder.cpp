@@ -6,6 +6,7 @@
 
 #include "Builder.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -83,6 +84,12 @@ namespace OSB::Builder
 				t[0] = x;
 				t[1] = y;
 				t[2] = z;
+				// rotation rows (stride 16): [[c,-s,0],[s,c,0],[0,0,1]] with s,c of the ref's angle z
+				auto* m = reinterpret_cast<float*>(a_out);
+				const float c = std::cos(yaw), s = std::sin(yaw);
+				m[0] = c;  m[1] = -s; m[2] = 0;
+				m[4] = s;  m[5] = c;  m[6] = 0;
+				m[8] = 0;  m[9] = 0;  m[10] = 1;
 			}
 			return r;
 		}
@@ -120,7 +127,8 @@ namespace OSB::Builder
 		{
 			if (g_forcing.load() && a_engine) {
 				auto& status = *reinterpret_cast<std::uint8_t*>(reinterpret_cast<std::uintptr_t>(a_engine) + kStatus);
-				if (status != kStatusOk) {
+				// early passes: only cost (0x18) and overlap (4); last pass: everything
+				if (status != kStatusOk && (g_forceAll.load() || status == 0x18 || status == 4)) {
 					REX::INFO("builder: commit with status {} forced", status);
 					status = kStatusOk;
 				}
@@ -164,14 +172,12 @@ namespace OSB::Builder
 			return REL::Relocation<func_t>{ kLookupEntry }(reinterpret_cast<void*>(kMenuTable.address()), a_formID);
 		}
 
-		void PostNewItem(void* a_entry)
+		// The lookup returns the menu entry and leaves the matched variant form in the slot after the table
+		// (kMenuCtx); NewItem's int is the variant's form ID. We pass the wanted form ID directly.
+		void PostNewItem(void* a_entry, std::uint32_t a_formID)
 		{
-			std::int32_t ctx = 0;
-			if (auto* p = *reinterpret_cast<std::uintptr_t**>(kMenuCtx.address())) {
-				ctx = *reinterpret_cast<std::int32_t*>(reinterpret_cast<std::uintptr_t>(p) + 0x28);
-			}
 			using func_t = void (*)(void*, std::int32_t);
-			REL::Relocation<func_t>{ kPostNewItem }(a_entry, ctx);
+			REL::Relocation<func_t>{ kPostNewItem }(a_entry, static_cast<std::int32_t>(a_formID));
 		}
 
 		void PostCommit()
@@ -200,8 +206,14 @@ namespace OSB::Builder
 		}
 
 		// One object: preview at the target, commit. True if the engine committed it.
-		bool BuildOne(const Job& a_job, void* a_entry)
+		bool BuildOne(const Job& a_job)
 		{
+			// look up right before building: the lookup also sets the menu's selected variant
+			void* a_entry = LookupEntry(a_job.formID);
+			if (!a_entry) {
+				REX::WARN("builder: {} ({:08X}) is not in the build menu", a_job.name, a_job.formID);
+				return false;
+			}
 			{
 				std::scoped_lock l(g_targetLock);
 				g_tx = a_job.x;
@@ -211,7 +223,7 @@ namespace OSB::Builder
 			}
 			void* before = CurrentItem();
 			g_logAim = true;
-			PostNewItem(a_entry);
+			PostNewItem(a_entry, a_job.formID);
 			const bool got = WaitFor([&] { return CurrentItem() && CurrentItem() != before; }, 3000);
 			if (got) {
 				WaitFor([&] {
@@ -229,7 +241,7 @@ namespace OSB::Builder
 			void* item = CurrentItem();
 			PostCommit();
 			const bool committed = WaitFor([&] { return CurrentItem() != item; }, 1500);
-			REX::INFO("builder: {} ({:08X}) at {:.2f} {:.2f} {:.2f} (target {:.2f} {:.2f} {:.2f}) status {} -> {}", a_job.name, a_job.formID,
+			REX::INFO("builder: {} ({:08X}, size {:.0f}) at {:.2f} {:.2f} {:.2f} (target {:.2f} {:.2f} {:.2f}) status {} -> {}", a_job.name, a_job.formID, a_job.size,
 				p[0], p[1], p[2], a_job.x, a_job.y, a_job.z, status, committed ? "built" : "not built");
 			return committed;
 		}
@@ -241,35 +253,31 @@ namespace OSB::Builder
 		void Worker(std::vector<Job> a_jobs)
 		{
 			REX::INFO("builder: start, {} objects", a_jobs.size());
-			std::vector<std::pair<const Job*, void*>> todo;
+			// big things first (habs, structures), so furniture has a floor to land on
+			std::stable_sort(a_jobs.begin(), a_jobs.end(), [](const Job& a, const Job& b) { return a.size > b.size; });
+			std::vector<const Job*> todo;
 			for (const auto& job : a_jobs) {
-				if (auto* entry = LookupEntry(job.formID)) {
-					todo.emplace_back(&job, entry);
-				} else {
-					REX::WARN("builder: {} ({:08X}) is not in the build menu; skipped", job.name, job.formID);
-					++g_failed;
-					++g_done;
-				}
+				todo.push_back(&job);
 			}
 			g_forcing = true;
 			for (int pass = 1; pass <= kPasses && !todo.empty() && !g_stop.load(); ++pass) {
 				g_forceAll = pass == kPasses;
 				REX::INFO("builder: pass {} ({} objects{})", pass, todo.size(), g_forceAll.load() ? ", forcing all checks" : "");
-				std::vector<std::pair<const Job*, void*>> retry;
-				for (const auto& [job, entry] : todo) {
+				std::vector<const Job*> retry;
+				for (const auto* job : todo) {
 					if (g_stop.load()) {
 						break;
 					}
-					if (BuildOne(*job, entry)) {
+					if (BuildOne(*job)) {
 						++g_built;
 						++g_done;
 					} else {
-						retry.emplace_back(job, entry);
+						retry.push_back(job);
 					}
 				}
 				todo = std::move(retry);
 			}
-			for (const auto& [job, entry] : todo) {
+			for (const auto* job : todo) {
 				REX::WARN("builder: {} ({:08X}) could not be built", job->name, job->formID);
 				++g_failed;
 				++g_done;

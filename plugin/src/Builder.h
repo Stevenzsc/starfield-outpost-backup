@@ -14,6 +14,7 @@ namespace OSB::Builder
 		float x{}, y{}, z{};
 		float yawDeg{};              // ObjectReference.GetAngleZ()
 		std::string name;            // for the log
+		float size{};                // footprint (m^2) from the base bounds; bigger objects are built first
 	};
 
 	// Install the engine hooks (call once at plugin load, before the game runs).
