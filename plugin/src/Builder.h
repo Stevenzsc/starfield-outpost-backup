@@ -32,4 +32,7 @@ namespace OSB::Builder
 
 	// True while build mode holds an item in placement.
 	bool IsPlacing();
+
+	// True if the build menu offers this form (directly or as a variant). The menu is filled in build mode.
+	bool InBuildMenu(std::uint32_t a_formID);
 }

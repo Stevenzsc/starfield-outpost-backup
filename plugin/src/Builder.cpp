@@ -362,7 +362,7 @@ namespace OSB::Builder
 			}
 			// small objects whose preview is not at the saved height have no floor yet (their hab is not
 			// built): leave them for a later pass, except on the last one
-			if (!g_forceAll.load() && a_job.size < kSmallObject && std::abs(p[2] - a_job.z) > 1.0f) {
+			if (!g_forceAll.load() && a_job.size < kSmallObject && std::abs(p[2] - a_job.z) > 0.3f) {
 				REX::INFO("builder: {} ({:08X}, size {:.0f}) at height {:.2f}, saved {:.2f}: later", a_job.name, a_job.formID, a_job.size, p[2], a_job.z);
 				return false;
 			}
@@ -398,7 +398,14 @@ namespace OSB::Builder
 		{
 			REX::INFO("builder: start, {} objects", a_jobs.size());
 			// big things first (habs, structures), so furniture has a floor to land on
-			std::stable_sort(a_jobs.begin(), a_jobs.end(), [](const Job& a, const Job& b) { return a.size > b.size; });
+			// then small things from the lowest saved height up: a desk before the computer on it
+			std::stable_sort(a_jobs.begin(), a_jobs.end(), [](const Job& a, const Job& b) {
+				const bool bigA = a.size >= kSmallObject, bigB = b.size >= kSmallObject;
+				if (bigA != bigB) return bigA;
+				if (bigA) return a.size > b.size;
+				if (a.z != b.z) return a.z < b.z;
+				return a.size > b.size;
+			});
 			std::vector<const Job*> todo;
 			for (const auto& job : a_jobs) {
 				todo.push_back(&job);
@@ -491,5 +498,10 @@ namespace OSB::Builder
 	bool IsPlacing()
 	{
 		return Field<void*>(kItem) != nullptr;
+	}
+
+	bool InBuildMenu(std::uint32_t a_formID)
+	{
+		return LookupEntry(a_formID) != nullptr;
 	}
 }

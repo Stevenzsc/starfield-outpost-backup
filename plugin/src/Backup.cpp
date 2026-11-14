@@ -85,6 +85,9 @@ namespace OSB
 		std::size_t g_skipped = 0;   // objects left out of the current backup (not buildable)
 		Backup     g_loaded;      // read by LoadRestore
 		std::vector<std::size_t> g_restoreOrder;   // indices into g_loaded.items after filtering
+		// PackIns with no recipe of their own: vanilla habs are menu variants (e.g. OpsHabFourWall02), hab walls
+		// are not in the menu at all. AutoBuild asks the build menu (only filled in build mode) which are which.
+		std::vector<std::size_t> g_menuCandidates;
 
 		std::vector<Entry> g_list;       // last ListBackups result
 		std::int32_t       g_page = 0;
@@ -922,6 +925,7 @@ namespace OSB
 			std::scoped_lock l(g_lock);
 			RestoreSelection();
 			g_restoreOrder.clear();
+			g_menuCandidates.clear();
 			if (g_selected.empty() || !Load(g_selected, g_loaded)) {
 				return -1;
 			}
@@ -948,6 +952,9 @@ namespace OSB
 			for (std::size_t i = 0; i < g_loaded.items.size(); ++i) {
 				const auto& it = g_loaded.items[i];
 				if (auto* form = FindForm(it.plugin, it.local); form && !IsBuildable(form)) {
+					if (it.pack) {
+						g_menuCandidates.push_back(i);
+					}
 					++notBuildable;   // hab part (light, trigger, sound space...): its parent spawns it
 					continue;
 				}
@@ -1011,7 +1018,36 @@ namespace OSB
 			std::vector<Builder::Job> jobs;
 			{
 				std::scoped_lock l(g_lock);
+				// recipe-buildable objects, then PackIns the build menu offers as variants (vanilla habs);
+				// a PackIn at the same pivot as one already kept is spawned by it
+				std::vector<std::size_t> order = g_restoreOrder;
+				std::vector<std::size_t> packs;
 				for (auto idx : g_restoreOrder) {
+					if (g_loaded.items[idx].pack) {
+						packs.push_back(idx);
+					}
+				}
+				std::size_t fromMenu = 0;
+				for (auto idx : g_menuCandidates) {
+					const auto& it = g_loaded.items[idx];
+					auto* form = FindForm(it.plugin, it.local);
+					if (!form || !Builder::InBuildMenu(form->GetFormID())) {
+						continue;
+					}
+					const bool covered = std::ranges::any_of(packs, [&](std::size_t p) {
+						const auto& o = g_loaded.items[p];
+						return std::abs(o.x - it.x) < 0.01f && std::abs(o.y - it.y) < 0.01f && std::abs(o.z - it.z) < 0.2f;
+					});
+					if (covered) {
+						continue;
+					}
+					REX::INFO("restore: {} {:X} at {:.2f} {:.2f} {:.2f} is a build menu variant: building it", it.plugin, it.local, it.x, it.y, it.z);
+					order.push_back(idx);
+					packs.push_back(idx);
+					++fromMenu;
+				}
+				REX::INFO("restore: {} objects from recipes, {} more from build menu variants", g_restoreOrder.size(), fromMenu);
+				for (auto idx : order) {
 					const auto& it = g_loaded.items[idx];
 					auto* form = FindForm(it.plugin, it.local);
 					if (!form) {
