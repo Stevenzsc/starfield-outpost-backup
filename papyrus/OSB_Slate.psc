@@ -13,6 +13,8 @@ int Property kPickMsg = 0x80B AutoReadOnly Hidden
 int Property kFarBeaconMsg = 0x80D AutoReadOnly Hidden
 int Property kDupMsg = 0x80E AutoReadOnly Hidden
 int Property kDeleteMsg = 0x80F AutoReadOnly Hidden
+int Property kNavKeyword = 0x810 AutoReadOnly Hidden
+int Property kNavQuest = 0x811 AutoReadOnly Hidden
 
 float Property kMaxGuideMeters = 2000.0 AutoReadOnly Hidden      ; farther than this: land again first
 float Property kBeaconNearMeters = 50.0 AutoReadOnly Hidden      ; a beacon this close to the saved spot counts
@@ -31,7 +33,7 @@ Function Notify(string asText)
 EndFunction
 
 Event OnRead()
-	if OSB_Native.Version() < 3
+	if OSB_Native.Version() < 4
 		Debug.MessageBox("Outpost Backup: the SFSE plugin is missing or out of date.\n\nInstall Data\\SFSE\\Plugins\\OutpostBackup.dll and start the game with SFSE (sfse_loader.exe).")
 		return
 	endif
@@ -220,13 +222,72 @@ int Function DoLand()
 		return flow   ; already there: the flow moves you onto the spot
 	endif
 	string planetName = Where()
+	bool marked = StartNav()
 	if Game.IsFarTravelControlsEnabled()
-		Debug.Notification("Outpost Backup: open " + planetName + " in the star map and land anywhere on it.")
+		if marked
+			Debug.Notification("Outpost Backup: " + planetName + " has a quest marker in the star map. Set course and land anywhere on it.")
+		else
+			Debug.Notification("Outpost Backup: open " + planetName + " in the star map and land anywhere on it.")
+		endif
 		Game.ShowGalaxyStarMapMenu()
 	else
 		Debug.MessageBox("Landing set.\n\nWhen you can travel again, open " + planetName + " in the star map and land anywhere on it: your ship lands at the saved outpost.")
 	endif
 	return flow
+EndFunction
+
+; ---------- star-map marker ----------
+; OSB_NavQuest finds the location tagged with OSB_NavTargetKeyword and puts a quest target on that planet.
+
+Location navLoc = None
+
+Quest Function NavQuest()
+	return Game.GetFormFromFile(kNavQuest, "OutpostBackup.esp") as Quest
+EndFunction
+
+Keyword Function NavKeyword()
+	return Game.GetFormFromFile(kNavKeyword, "OutpostBackup.esp") as Keyword
+EndFunction
+
+; Mark the selected outpost's planet. False for backups without a planet location (back up again to fix).
+bool Function StartNav()
+	Location loc = OSB_Native.GetSelectedPlanetLocation()
+	Quest q = NavQuest()
+	Keyword kw = NavKeyword()
+	StopNav()
+	if loc == None || q == None || kw == None
+		Debug.Trace("OSB: no star-map marker (location " + loc + ", quest " + q + ", keyword " + kw + ")")
+		return false
+	endif
+	navLoc = loc
+	loc.AddKeyword(kw)
+	if !q.Start()
+		Debug.Trace("OSB: OSB_NavQuest did not start for " + loc)
+		StopNav()
+		return false
+	endif
+	q.SetObjectiveDisplayed(10)
+	q.SetActive(true)
+	Debug.Trace("OSB: star-map marker set on " + loc)
+	return true
+EndFunction
+
+Function StopNav()
+	Quest q = NavQuest()
+	if q && q.IsRunning()
+		q.SetObjectiveCompleted(10)
+		q.Stop()
+		int i = 0
+		while !q.IsStopped() && i < 50
+			Utility.Wait(0.1)
+			i += 1
+		endwhile
+	endif
+	Keyword kw = NavKeyword()
+	if navLoc && kw
+		navLoc.RemoveKeyword(kw)
+	endif
+	navLoc = None
 EndFunction
 
 ; Returns a flow id to run after the menu closes, or 0.
@@ -286,6 +347,7 @@ Function RunFlow(int aiFlow)
 			endif
 			if spot && spot.Length >= 4 && spot[3] <= kMaxGuideMeters
 				Utility.Wait(1.0)
+				StopNav()   ; arrived: drop the star-map marker
 				; 2. stand on the saved beacon spot (unless a beacon is already there)
 				ObjectReference beacon = BeaconNearSpot(spot)
 				if beacon == None

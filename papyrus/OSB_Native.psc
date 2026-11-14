@@ -41,6 +41,8 @@ string Function GetSelectedPlanetName() global native
 string Function GetSelectedSystemName() global native
 ; True if a workshop recipe builds this base (not a part the game spawns for habs).
 bool Function IsBuildable(Form akBase) global native
+; The selected outpost's planet Location (None for older backups).
+Location Function GetSelectedPlanetLocation() global native
 ; Move the selected backup to OutpostBackup\Deleted.
 bool Function DeleteBackup() global native
 
