@@ -185,7 +185,7 @@ namespace OSB::Builder
 
 		// Commit handlers (state vfunc 0xB8, engine in r8) refuse unless engine+0x193 == 2: force it there.
 		using OnCommit_t = std::uintptr_t (*)(void*, void*, void* a_engine, void*);
-		OnCommit_t g_onCommit[2]{};
+		OnCommit_t g_onCommit[3]{};
 
 		template <std::size_t I>
 		std::uintptr_t OnCommitHook(void* a_state, void* a_event, void* a_engine, void* a_4)
@@ -196,6 +196,12 @@ namespace OSB::Builder
 				if (status != kStatusOk && (g_forceAll.load() || status == 0x18 || status == 4)) {
 					REX::INFO("builder: commit with status {} forced", status);
 					status = kStatusOk;
+				}
+				if constexpr (I == 2) {
+					const auto e = reinterpret_cast<std::uintptr_t>(a_engine);
+					const auto* p = reinterpret_cast<const float*>(e + kPreviewPos);
+					REX::INFO("builder: commit in snapped state: snap {} substate {} at {:.2f} {:.2f} {:.2f}",
+						*reinterpret_cast<std::uint8_t*>(e + 0x188), *reinterpret_cast<std::uint8_t*>(e + 0x630), p[0], p[1], p[2]);
 				}
 			}
 			return g_onCommit[I](a_state, a_event, a_engine, a_4);
@@ -465,6 +471,9 @@ namespace OSB::Builder
 		g_foundation = HookCall<Foundation_t>(kStateUpdateFoundation, kFoundationCallOff, &FoundationHook, "foundation height (21D5CE0)");
 		HookSlot<0>(REL::ID(466620), 0xB8 / 8, "StateUpdatePlacement commit (21B2E20)");
 		HookSlot<1>(REL::ID(466892), 0xB8 / 8, "StateUpdateAutoFoundation commit (21B2360)");
+		// a hab next to or on another hab snaps first; this state commits only with +0x188 (snap found),
+		// status 2 and +0x630 == 4
+		HookSlot<2>(REL::ID(466661), 0xB8 / 8, "StateUpdateSnapped commit (21B4B70)");
 		[]<std::size_t... I>(std::index_sequence<I...>) { (HookCmd<I>(), ...); }(std::make_index_sequence<kGuardCount>{});
 		REX::INFO("builder: player command lock installed ({} commands)", kGuardCount);
 	}
