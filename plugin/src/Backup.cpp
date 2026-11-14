@@ -40,7 +40,7 @@ namespace OSB
 		// BGSPlanet::Manager (static object), see docs: +0x80 planet, +0x98 lon, +0xA0 lat (radians), +0x100 radius km
 		constexpr REL::ID kPlanetManager{ 945580 };
 
-		constexpr std::int32_t kVersion = 3;
+		constexpr std::int32_t kVersion = 4;
 
 		// OSB_PickMsg layout (see tools\esp): button 0 Cancel, 1 More..., 2..9 entries
 		constexpr std::size_t kPickEntries = 8;
@@ -59,6 +59,8 @@ namespace OSB
 		struct Backup
 		{
 			std::string name, planetName, systemName;
+			std::string planetLocPlugin;          // the planet's Location form (for the star-map marker)
+			std::uint32_t planetLocLocal{ 0 };
 			std::int64_t time{ 0 };
 			std::uint32_t planet{ 0 };
 			double radiusKm{ 0 }, lat{ 0 }, lon{ 0 };
@@ -300,6 +302,9 @@ namespace OSB
 			o << "name\t" << Clean(b.name) << '\n';
 			o << "planetname\t" << Clean(b.planetName) << '\n';
 			o << "systemname\t" << Clean(b.systemName) << '\n';
+			if (!b.planetLocPlugin.empty()) {
+				o << "planetloc\t" << b.planetLocPlugin << '\t' << std::format("{:X}", b.planetLocLocal) << '\n';
+			}
 			o << "time\t" << b.time << '\n';
 			o << "planet\t" << std::format("{:08X}", b.planet) << '\t' << b.radiusKm << '\n';
 			o << "origin\t" << b.lat << '\t' << b.lon << '\n';
@@ -364,6 +369,9 @@ namespace OSB
 						b.planetName = t[1];
 					} else if (t[0] == "systemname" && t.size() >= 2) {
 						b.systemName = t[1];
+					} else if (t[0] == "planetloc" && t.size() >= 3) {
+						b.planetLocPlugin = t[1];
+						b.planetLocLocal = std::stoul(t[2], nullptr, 16);
 					} else if (t[0] == "time" && t.size() >= 2) {
 						b.time = std::stoll(t[1]);
 					} else if (t[0] == "planet" && t.size() >= 3) {
@@ -534,6 +542,9 @@ namespace OSB
 			g_pending.lon = s.lon;
 			g_pending.bx = a_bx; g_pending.by = a_by; g_pending.bz = a_bz; g_pending.byaw = a_byaw;
 			g_pending.planetName = LocationName(a_planetLoc);
+			if (a_planetLoc) {
+				SplitFormID(a_planetLoc->GetFormID(), g_pending.planetLocPlugin, g_pending.planetLocLocal);
+			}
 			if (g_pending.planetName.empty()) {
 				g_pending.planetName = FormName(RE::TESForm::LookupByID(s.planet));
 			}
@@ -768,6 +779,19 @@ namespace OSB
 			return e ? e->head.systemName : std::string();
 		}
 
+		// The selected outpost's planet Location (None for backups made before v0.3.1).
+		RE::BGSLocation* GetSelectedPlanetLocation(std::monostate)
+		{
+			std::scoped_lock l(g_lock);
+			RestoreSelection();
+			Backup b;
+			if (g_selected.empty() || !Load(g_selected, b, nullptr, false) || b.planetLocPlugin.empty()) {
+				return nullptr;
+			}
+			auto* form = FindForm(b.planetLocPlugin, b.planetLocLocal);
+			return form ? form->As<RE::BGSLocation>() : nullptr;
+		}
+
 		bool IsBuildableBase(std::monostate, RE::TESForm* a_base)
 		{
 			return a_base && IsBuildable(a_base);
@@ -971,6 +995,7 @@ namespace OSB
 		vm->BindNativeMethod(obj, "GetSelectedPlanetName", GetSelectedPlanetName, true, false);
 		vm->BindNativeMethod(obj, "GetSelectedSystemName", GetSelectedSystemName, true, false);
 		vm->BindNativeMethod(obj, "IsBuildable", IsBuildableBase, true, false);
+		vm->BindNativeMethod(obj, "GetSelectedPlanetLocation", GetSelectedPlanetLocation, true, false);
 		vm->BindNativeMethod(obj, "DeleteBackup", DeleteBackup, true, false);
 		vm->BindNativeMethod(obj, "ArmLanding", ArmLanding, true, false);
 		vm->BindNativeMethod(obj, "GetGuideSpot", GetGuideSpot, true, false);

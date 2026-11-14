@@ -106,6 +106,12 @@ class PatchEsp
 			Console.WriteLine("write MESG {0:X8} {1} ({2} buttons)", m.Id, m.Edid, m.Buttons.Length);
 		}
 
+		// Star-map marker on the saved outpost's planet: the slate tags the planet's Location with
+		// OSB_NavTargetKeyword and starts OSB_NavQuest, which finds that location and creates the same
+		// radiant-planet quest target the survey missions use (MB_SurveyPlanet04_LIST).
+		Put(order, headers, groups, "KYWD", true, BuildKeyword(NavKeywordId, "OSB_NavTargetKeyword"), template);
+		Put(order, headers, groups, "QUST", false, BuildNavQuest(), template);
+
 		// header: record count (records + groups) and next object id
 		int count = 0; uint maxId = 0;
 		var body = new MemoryStream();
@@ -131,6 +137,97 @@ class PatchEsp
 		}
 		Console.WriteLine("records+groups {0}, next id {1:X}, wrote {2}", count, maxId + 1, args[1]);
 		return 0;
+	}
+
+	const uint NavKeywordId = 0x01000810;
+	const uint NavQuestId = 0x01000811;
+
+	class Built { public string Type; public uint Id; public string Edid; public byte[] Data; }
+
+	static void Put(List<string> order, Dictionary<string, byte[]> headers, Dictionary<string, List<Rec>> groups, string label, bool first, Built b, byte[] template)
+	{
+		if (!groups.ContainsKey(label)) {
+			if (first) order.Insert(0, label); else order.Add(label);
+			byte[] h = new byte[24];
+			Encoding.ASCII.GetBytes("GRUP").CopyTo(h, 0);
+			Encoding.ASCII.GetBytes(label).CopyTo(h, 8);
+			headers[label] = h;
+			groups[label] = new List<Rec>();
+		}
+		var recs = groups[label];
+		recs.RemoveAll(r => r.Id == b.Id);
+		byte[] rec = new byte[24 + b.Data.Length];
+		Encoding.ASCII.GetBytes(b.Type).CopyTo(rec, 0);
+		BitConverter.GetBytes(b.Data.Length).CopyTo(rec, 4);
+		BitConverter.GetBytes(b.Id).CopyTo(rec, 12);
+		if (template != null) Array.Copy(template, 16, rec, 16, 8);
+		else BitConverter.GetBytes((ushort)0x240).CopyTo(rec, 20);
+		b.Data.CopyTo(rec, 24);
+		recs.Add(new Rec { Type = b.Type, Id = b.Id, Edid = b.Edid, Bytes = rec });
+		Console.WriteLine("write {0} {1:X8} {2}", b.Type, b.Id, b.Edid);
+	}
+
+	static Built BuildKeyword(uint id, string edid)
+	{
+		var s = new MemoryStream();
+		Sub(s, "EDID", Z(edid));
+		Sub(s, "CNAM", new byte[] { 0xFF, 0xFF, 0xFF, 0x00 });
+		Sub(s, "TNAM", BitConverter.GetBytes(0u));
+		return new Built { Type = "KYWD", Id = id, Edid = edid, Data = s.ToArray() };
+	}
+
+	static Built BuildNavQuest()
+	{
+		var s = new MemoryStream();
+		Sub(s, "EDID", Z("OSB_NavQuest"));
+		Sub(s, "FULL", Z("Outpost Backup"));
+		Sub(s, "DNAM", new byte[12]);
+		Sub(s, "NEXT", new byte[0]);
+		// objective 10 -> alias 2 (the marker)
+		Sub(s, "QOBJ", BitConverter.GetBytes((ushort)10));
+		Sub(s, "FNAM", BitConverter.GetBytes(0u));
+		Sub(s, "NNAM", Z("Travel to <Alias=Planet> to restore your outpost"));
+		Sub(s, "QSTA", Cat(BitConverter.GetBytes(2), new byte[8]));
+		Sub(s, "ANAM", BitConverter.GetBytes(3u));
+		// alias 0: the planet location (location carrying OSB_NavTargetKeyword)
+		Sub(s, "ALLS", BitConverter.GetBytes(0u));
+		Sub(s, "ALID", Z("Planet"));
+		Sub(s, "FNAM", BitConverter.GetBytes(0x00000100u));
+		Sub(s, "ALFG", BitConverter.GetBytes(0u));
+		Sub(s, "ALKF", BitConverter.GetBytes(NavKeywordId));
+		Sub(s, "ALED", new byte[0]);
+		// alias 1: collection created from the radiant-planet target cell at the planet location
+		Sub(s, "ALCS", BitConverter.GetBytes(1u));
+		Sub(s, "ALMI", new byte[] { 0 });
+		Sub(s, "ALST", BitConverter.GetBytes(1u));
+		Sub(s, "ALID", Z("PlanetOrbital"));
+		Sub(s, "FNAM", BitConverter.GetBytes(0x00080000u));
+		Sub(s, "ALFG", BitConverter.GetBytes(0u));
+		Sub(s, "ALCO", BitConverter.GetBytes(0x00212179u));   // scRadiantPlanetQT
+		Sub(s, "ALCA", BitConverter.GetBytes(0u));           // at alias 0
+		Sub(s, "ALCL", BitConverter.GetBytes(0u));
+		Sub(s, "VTCK", BitConverter.GetBytes(0u));
+		Sub(s, "ALED", new byte[0]);
+		// alias 2: the marker in that collection (base RadiantPlanetQTMarker 0x212148)
+		Sub(s, "ALST", BitConverter.GetBytes(2u));
+		Sub(s, "ALID", Z("PlanetTarget"));
+		Sub(s, "FNAM", BitConverter.GetBytes(0u));
+		Sub(s, "ALFG", BitConverter.GetBytes(0u));
+		Sub(s, "ALCS", BitConverter.GetBytes(1u));
+		Sub(s, "CTDA", Hex("00000000 0000803F 48000D41 48212100 00000000 00000000 00000000 FFFFFFFF"));   // GetIsID RadiantPlanetQTMarker == 1
+		Sub(s, "VTCK", BitConverter.GetBytes(0u));
+		Sub(s, "ALED", new byte[0]);
+		return new Built { Type = "QUST", Id = NavQuestId, Edid = "OSB_NavQuest", Data = s.ToArray() };
+	}
+
+	static byte[] Cat(byte[] a, byte[] b) { var r = new byte[a.Length + b.Length]; a.CopyTo(r, 0); b.CopyTo(r, a.Length); return r; }
+
+	static byte[] Hex(string h)
+	{
+		h = h.Replace(" ", "");
+		var r = new byte[h.Length / 2];
+		for (int i = 0; i < r.Length; i++) r[i] = Convert.ToByte(h.Substring(i * 2, 2), 16);
+		return r;
 	}
 
 	static byte[] BuildMesg(Msg m, byte[] template)
