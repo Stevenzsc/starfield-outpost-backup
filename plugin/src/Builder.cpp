@@ -48,6 +48,7 @@ namespace OSB::Builder
 		std::atomic<bool> g_forceAll{ false };
 		std::atomic<bool> g_logAim{ false };
 		std::atomic<bool> g_logFoundation{ false };
+		std::atomic<bool> g_lockZ{ false };           // last pass, non-hab objects: hold the saved height
 		std::atomic<std::uint32_t> g_placed{ 0 };    // Workshop::ItemPlacedEvent count
 		constexpr float kSmallObject = 20.0f;        // m^2 footprint: furniture and decorations
 
@@ -130,6 +131,19 @@ namespace OSB::Builder
 				auto& status = *reinterpret_cast<std::uint8_t*>(reinterpret_cast<std::uintptr_t>(a_engine) + kStatus);
 				if (status == 4 || (g_forceAll.load() && status != kStatusOk)) {   // overlap (or anything, last pass): build anyway
 					status = kStatusOk;
+				}
+				// last pass: keep the saved height instead of the engine's drop to the surface below
+				// (preview z at +0x140, then re-apply the preview transform: item vfunc 0xE0, as 21D74B0 does)
+				if (g_lockZ.load()) {
+					const auto e = reinterpret_cast<std::uintptr_t>(a_engine);
+					{
+						std::scoped_lock l(g_targetLock);
+						*reinterpret_cast<float*>(e + kPreviewPos + 8) = g_tz;
+					}
+					if (auto* item = *reinterpret_cast<void**>(e + kItem)) {
+						using apply_t = void (*)(void*, void*);
+						(*reinterpret_cast<apply_t**>(item))[0xE0 / 8](item, a_engine);
+					}
 				}
 			}
 			return r;
@@ -343,6 +357,7 @@ namespace OSB::Builder
 				g_tyaw = a_job.yawDeg * std::numbers::pi_v<float> / 180.0f;
 			}
 			void* before = CurrentItem();
+			g_lockZ = g_forceAll.load() && a_job.size < kSmallObject;
 			g_logAim = true;
 			g_logFoundation = true;
 			PostNewItem(a_entry, a_job.formID);
@@ -434,6 +449,7 @@ namespace OSB::Builder
 				++g_done;
 			}
 			g_forceAll = false;
+			g_lockZ = false;
 			g_forcing = false;
 			PostCancel();   // drop the last preview the engine re-offers after a commit
 			REX::INFO("builder: done, built {}, failed {}, of {}", g_built.load(), g_failed.load(), g_total.load());
