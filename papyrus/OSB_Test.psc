@@ -1,15 +1,15 @@
 Scriptname OSB_Test
-{ Outpost Backup - 验证脚本。在控制台用 cgf 调用，不需要 esp。 }
+{ Outpost Backup - verification script. Call from console with cgf, no esp needed. }
 
-; 用法（控制台）：
-;   cgf "OSB_Test.List" <信标refID十进制>
-;   cgf "OSB_Test.PlaceTest" <信标refID十进制> <某个哨站物件refID十进制>
-; 输出：屏幕提示 + Papyrus 日志（Documents\My Games\Starfield\Logs\Script\Papyrus.0.log）
+; Usage (console):
+;   cgf "OSB_Test.List" <beaconRefID decimal>
+;   cgf "OSB_Test.PlaceTest" <beaconRefID decimal> <outpostObjectRefID decimal>
+; Output: notifications + Papyrus log（Documents\My Games\Starfield\Logs\Script\Papyrus.0.log）
 
 ObjectReference Function GetRef(int aiFormID) global
 	ObjectReference ref = Game.GetForm(aiFormID) as ObjectReference
 	if ref == None
-		Debug.Notification("OSB: 找不到 refID " + aiFormID)
+		Debug.Notification("OSB: refID not found " + aiFormID)
 		Debug.Trace("OSB: GetForm failed for " + aiFormID)
 	endif
 	return ref
@@ -34,7 +34,7 @@ Function DumpArray(string asLabel, ObjectReference[] akRefs, ObjectReference akB
 		i += 1
 	endwhile
 	Debug.Trace("OSB: [" + asLabel + "] total=" + n + " belongToBeacon=" + sameWorkshop)
-	Debug.Notification("OSB " + asLabel + ": " + n + " 个（属于此哨站 " + sameWorkshop + "）")
+	Debug.Notification("OSB " + asLabel + ": " + n + " found (in this outpost: " + sameWorkshop + ")")
 EndFunction
 
 Function List(int aiBeaconID) global
@@ -59,7 +59,7 @@ Function PlaceTest(int aiBeaconID, int aiSourceID) global
 	Form base = src.GetBaseObject()
 	ObjectReference newRef = src.PlaceAtMe(base, 1, true, false, false)
 	if newRef == None
-		Debug.Notification("OSB: PlaceAtMe 失败")
+		Debug.Notification("OSB: PlaceAtMe failed")
 		Debug.Trace("OSB: PlaceTest PlaceAtMe returned None, base=" + base)
 		return
 	endif
@@ -68,5 +68,5 @@ Function PlaceTest(int aiBeaconID, int aiSourceID) global
 	bool inArea = newRef.IsWithinBuildableArea(beacon)
 	ObjectReference ws = newRef.GetWorkshop()
 	Debug.Trace("OSB: PlaceTest new=" + newRef + " base=" + base + " workshop=" + ws + " inBuildableArea=" + inArea + " srcWorkshop=" + src.GetWorkshop())
-	Debug.Notification("OSB 放置: workshop=" + ws + " 在可建区=" + inArea)
+	Debug.Notification("OSB place: workshop=" + ws + " inArea=" + inArea)
 EndFunction
