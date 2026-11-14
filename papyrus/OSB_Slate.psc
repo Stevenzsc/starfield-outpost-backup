@@ -405,9 +405,13 @@ EndFunction
 ; (the caller then falls back to placing objects directly).
 bool Function AutoBuildAt(ObjectReference akBeacon, int aiCount)
 	Notify("building " + aiCount + " objects in build mode, please wait...")
+	; lock movement and looking during the build (the plugin also ignores build-mode keys)
+	InputEnableLayer lock = InputEnableLayer.Create()
+	lock.DisablePlayerControls(true, true, true, true, true, true, true, true, true, true, true)
 	akBeacon.StartWorkshop(true)
 	Utility.Wait(3.0)
 	if !OSB_Native.AutoBuild()
+		lock.Delete()
 		akBeacon.StartWorkshop(false)
 		Debug.Trace("OSB: auto-build could not start, placing objects directly")
 		return false
@@ -423,6 +427,7 @@ bool Function AutoBuildAt(ObjectReference akBeacon, int aiCount)
 		endif
 	endwhile
 	akBeacon.StartWorkshop(false)
+	lock.Delete()
 	if p && p.Length >= 5
 		if p[2] > 0
 			Debug.MessageBox("Built " + p[1] + " of " + p[3] + " objects.\n\n" + p[2] + " could not be built (not in the build menu, e.g. a mod that is not installed).")

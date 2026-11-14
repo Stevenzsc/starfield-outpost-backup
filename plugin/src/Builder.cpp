@@ -163,6 +163,63 @@ namespace OSB::Builder
 			REX::INFO("builder: hooked {}", a_name);
 		}
 
+		// ---- player input lock ----
+		// Every engine command runs through slot 1 of its BSService TCmd vtable. While a build runs, commands
+		// the builder did not post itself (player keys: build, cancel, rotate, other item, exit...) are dropped.
+		enum CmdKind { kCmdNewItem, kCmdCommit, kCmdCancel, kCmdPlayerOnly };
+		struct Guard
+		{
+			REL::ID vtbl;
+			const char* name;
+			CmdKind kind;
+		};
+		const Guard kGuards[] = {
+			{ REL::ID(466536), "NewItem", kCmdNewItem },        // +0x4D49750
+			{ REL::ID(466568), "Commit", kCmdCommit },          // +0x4D49910
+			{ REL::ID(466554), "Cancel", kCmdCancel },          // +0x4D498F0
+			{ REL::ID(466534), "Exit", kCmdPlayerOnly },        // +0x4D49770
+			{ REL::ID(466522), "EditItem", kCmdPlayerOnly },    // +0x4D49830
+			{ REL::ID(466520), "BulldozeItem", kCmdPlayerOnly },
+			{ REL::ID(466546), "RotateItem", kCmdPlayerOnly },
+			{ REL::ID(466560), "CycleBehavior", kCmdPlayerOnly },
+			{ REL::ID(466558), "RevertBehavior", kCmdPlayerOnly },
+			{ REL::ID(466570), "RemoveItem", kCmdPlayerOnly },
+			{ REL::ID(466524), "ActivateItem", kCmdPlayerOnly },
+		};
+		constexpr std::size_t kGuardCount = std::size(kGuards);
+		using Cmd_t = std::uintptr_t (*)(void*, void*, void*, void*);
+		Cmd_t g_cmdOrig[kGuardCount]{};
+		std::atomic<int> g_allow[3]{};   // commands the builder posted and that may run
+
+		template <std::size_t I>
+		std::uintptr_t CmdHook(void* a_1, void* a_2, void* a_3, void* a_4)
+		{
+			if (g_running.load()) {
+				const auto kind = kGuards[I].kind;
+				if (kind != kCmdPlayerOnly && g_allow[kind].load() > 0) {
+					--g_allow[kind];
+				} else {
+					REX::INFO("builder: ignored player command {} during the build", kGuards[I].name);
+					return 0;
+				}
+			}
+			return g_cmdOrig[I](a_1, a_2, a_3, a_4);
+		}
+
+		template <std::size_t I>
+		void HookCmd()
+		{
+			auto* slot = reinterpret_cast<std::uintptr_t*>(kGuards[I].vtbl.address()) + 1;
+			unsigned long old = 0;
+			if (!VirtualProtect(slot, sizeof(*slot), 0x04, &old)) {
+				REX::ERROR("builder: VirtualProtect failed for TCmd {}", kGuards[I].name);
+				return;
+			}
+			g_cmdOrig[I] = reinterpret_cast<Cmd_t>(*slot);
+			*slot = reinterpret_cast<std::uintptr_t>(&CmdHook<I>);
+			VirtualProtect(slot, sizeof(*slot), old, &old);
+		}
+
 		template <class F>
 		F HookCall(REL::ID a_func, std::ptrdiff_t a_off, F a_hook, const char* a_name)
 		{
@@ -188,18 +245,21 @@ namespace OSB::Builder
 		// (kMenuCtx); NewItem's int is the variant's form ID. We pass the wanted form ID directly.
 		void PostNewItem(void* a_entry, std::uint32_t a_formID)
 		{
+			++g_allow[kCmdNewItem];
 			using func_t = void (*)(void*, std::int32_t);
 			REL::Relocation<func_t>{ kPostNewItem }(a_entry, static_cast<std::int32_t>(a_formID));
 		}
 
 		void PostCommit()
 		{
+			++g_allow[kCmdCommit];
 			using func_t = void (*)();
 			REL::Relocation<func_t>{ kPostCommit }();
 		}
 
 		void PostCancel()
 		{
+			++g_allow[kCmdCancel];
 			using func_t = void (*)();
 			REL::Relocation<func_t>{ kPostCancel }();
 		}
@@ -317,6 +377,8 @@ namespace OSB::Builder
 		g_update = HookCall<Update_t>(kStateUpdatePlacement, kUpdateCallOff, &UpdateHook, "placement update (21D74B0)");
 		HookSlot<0>(REL::ID(466620), 0xB8 / 8, "StateUpdatePlacement commit (21B2E20)");
 		HookSlot<1>(REL::ID(466892), 0xB8 / 8, "StateUpdateAutoFoundation commit (21B2360)");
+		[]<std::size_t... I>(std::index_sequence<I...>) { (HookCmd<I>(), ...); }(std::make_index_sequence<kGuardCount>{});
+		REX::INFO("builder: player command lock installed ({} commands)", kGuardCount);
 	}
 
 	bool Start(std::vector<Job> a_jobs)
@@ -337,6 +399,9 @@ namespace OSB::Builder
 				src->RegisterSink(&sink);
 				sinkRegistered = true;
 			}
+		}
+		for (auto& a : g_allow) {
+			a = 0;
 		}
 		g_stop = false;
 		g_done = 0;
