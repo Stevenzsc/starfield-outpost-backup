@@ -202,7 +202,21 @@ namespace OSB
 				if (!dh) {
 					return;
 				}
-				// Find the COBJ array by RTTI: the FormType index in the headers does not match this game version.
+				// The FormType enum and RTTI casts do not match this game version, so take the runtime form type
+				// from a known vanilla recipe: co_Outpost_Furniture_TablesScienceList01_Decor2_06 (0x100C2D)
+				// creates ConferenceTable_PI03 (0x2E2EE0).
+				constexpr std::uint32_t kProbe = 0x00100C2D, kProbeCreates = 0x002E2EE0;
+				auto* probe = RE::TESForm::LookupByID(kProbe);
+				if (!probe) {
+					REX::WARN("buildable: probe recipe {:08X} not found", kProbe);
+					return;
+				}
+				const auto type = probe->GetFormType();
+				auto* probeCobj = reinterpret_cast<RE::BGSConstructibleObject*>(probe);
+				if (!probeCobj->createdObject || probeCobj->createdObject->GetFormID() != kProbeCreates) {
+					REX::WARN("buildable: recipe layout check failed (created {:08X})", probeCobj->createdObject ? probeCobj->createdObject->GetFormID() : 0);
+					return;
+				}
 				constexpr std::size_t kArrays = std::extent_v<decltype(RE::TESDataHandler::formArrays)>;
 				for (std::size_t i = 0; i < kArrays; ++i) {
 					auto& arr = dh->formArrays[i].formArray;
@@ -213,28 +227,46 @@ namespace OSB
 							break;
 						}
 					}
-					if (!first || !starfield_cast<RE::BGSConstructibleObject*>(first)) {
+					if (!first || first->GetFormType() != type) {
 						continue;
 					}
 					for (auto& f : arr) {
-						auto* cobj = f ? starfield_cast<RE::BGSConstructibleObject*>(f.get()) : nullptr;
-						if (cobj && cobj->createdObject) {
+						if (!f || f->GetFormType() != type) {
+							continue;
+						}
+						auto* cobj = reinterpret_cast<RE::BGSConstructibleObject*>(f.get());
+						if (cobj->createdObject) {
 							set.insert(cobj->createdObject->GetFormID());
 						}
 					}
-					REX::INFO("buildable: COBJ array {} ({} recipes; header index {})", i, arr.size(), std::to_underlying(RE::FormType::kCOBJ));
+					REX::INFO("buildable: recipe array {} (form type {}, {} recipes)", i, std::to_underlying(type), arr.size());
 					break;
+				}
+				if (set.empty()) {
+					for (std::size_t i = 0; i < kArrays; ++i) {
+						auto& arr = dh->formArrays[i].formArray;
+						if (!arr.empty() && arr[0]) {
+							REX::INFO("buildable: array {} size {} first {:08X} type {}", i, arr.size(), arr[0]->GetFormID(), std::to_underlying(arr[0]->GetFormType()));
+						}
+					}
 				}
 				REX::INFO("buildable: {} objects have a workshop recipe", set.size());
 			});
 			return set;
 		}
 
-		// True if the base can be built in a workshop (or the recipe list is unavailable).
+		// True if the base can be built in a workshop. Without a recipe list, everything except
+		// objects known to hang PlaceAtMe (Starfield.esm EmptyTrigger).
 		bool IsBuildable(RE::TESForm* a_base)
 		{
+			if (!a_base) {
+				return false;
+			}
 			const auto& set = Buildable();
-			return set.empty() || (a_base && set.contains(a_base->GetFormID()));
+			if (set.empty()) {
+				return a_base->GetFormID() != 0x0000573F;
+			}
+			return set.contains(a_base->GetFormID());
 		}
 
 		// ---------- load order: runtime form id <-> plugin + local id ----------
