@@ -34,7 +34,7 @@ Function Notify(string asText)
 EndFunction
 
 Event OnRead()
-	if OSB_Native.Version() < 4
+	if OSB_Native.Version() < 5
 		Debug.MessageBox("Outpost Backup: the SFSE plugin is missing or out of date.\n\nInstall Data\\SFSE\\Plugins\\OutpostBackup.dll and start the game with SFSE (sfse_loader.exe).")
 		return
 	endif
@@ -400,6 +400,39 @@ ObjectReference Function WaitForBeacon(int aiFlow, float[] akSpot)
 	return None
 EndFunction
 
+; Build the loaded restore list through the workshop engine, like the player would: opens build mode at
+; the beacon, the plugin selects, positions and commits each object. False if it could not start
+; (the caller then falls back to placing objects directly).
+bool Function AutoBuildAt(ObjectReference akBeacon, int aiCount)
+	Notify("building " + aiCount + " objects in build mode, please wait...")
+	akBeacon.StartWorkshop(true)
+	Utility.Wait(3.0)
+	if !OSB_Native.AutoBuild()
+		akBeacon.StartWorkshop(false)
+		Debug.Trace("OSB: auto-build could not start, placing objects directly")
+		return false
+	endif
+	int[] p = OSB_Native.AutoBuildProgress()
+	float lastShown = Utility.GetCurrentRealTime()
+	while p && p.Length >= 5 && p[4] == 1
+		Utility.Wait(1.0)
+		p = OSB_Native.AutoBuildProgress()
+		if p && p.Length >= 5 && Utility.GetCurrentRealTime() - lastShown >= kProgressSeconds
+			lastShown = Utility.GetCurrentRealTime()
+			Notify("building... " + p[0] + " of " + p[3])
+		endif
+	endwhile
+	akBeacon.StartWorkshop(false)
+	if p && p.Length >= 5
+		if p[2] > 0
+			Debug.MessageBox("Built " + p[1] + " of " + p[3] + " objects.\n\n" + p[2] + " could not be built (not in the build menu, e.g. a mod that is not installed).")
+		else
+			Notify("built " + p[1] + " of " + p[3] + " objects.")
+		endif
+	endif
+	return true
+EndFunction
+
 Function RestoreAt(ObjectReference akBeacon, float[] akSpot)
 	while !OSB_Native.TryLock()
 		Utility.Wait(1.0)
@@ -419,6 +452,10 @@ Function RestoreAt(ObjectReference akBeacon, float[] akSpot)
 	int n = OSB_Native.LoadRestore()
 	if n <= 0
 		Notify("nothing to restore.")
+		OSB_Native.Unlock()
+		return
+	endif
+	if AutoBuildAt(akBeacon, n)
 		OSB_Native.Unlock()
 		return
 	endif

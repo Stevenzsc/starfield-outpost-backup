@@ -9,6 +9,7 @@
 
 #include "Backup.h"
 #include "Diag.h"
+#include "Builder.h"
 
 #include <cmath>
 #include <format>
@@ -170,8 +171,9 @@ namespace
 
 SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 {
-	SFSE::Init(a_sfse, { .trampoline = true, .trampolineSize = 128 });
+	SFSE::Init(a_sfse, { .trampoline = true, .trampolineSize = 256 });
 	Install();
+	OSB::Builder::Install();
 	if (const auto* msg = SFSE::GetMessagingInterface(); !msg || !msg->RegisterListener(OnMessage)) {
 		REX::WARN("could not register for SFSE messages; OSB_LoadOrder.txt will not be written");
 	}

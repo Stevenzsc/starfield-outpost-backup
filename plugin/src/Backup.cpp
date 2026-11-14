@@ -17,6 +17,7 @@
 // Objects are stored as plugin file + local form ID, so a different load order still restores.
 
 #include "Backup.h"
+#include "Builder.h"
 
 #include "REX/W32/OLE32.h"
 #include "REX/W32/SHELL32.h"
@@ -42,7 +43,7 @@ namespace OSB
 		// BGSPlanet::Manager (static object), see docs: +0x80 planet, +0x98 lon, +0xA0 lat (radians), +0x100 radius km
 		constexpr REL::ID kPlanetManager{ 945580 };
 
-		constexpr std::int32_t kVersion = 4;
+		constexpr std::int32_t kVersion = 5;
 
 		// OSB_PickMsg layout (see tools\esp): button 0 Cancel, 1 More..., 2..9 entries
 		constexpr std::size_t kPickEntries = 8;
@@ -1003,6 +1004,35 @@ namespace OSB
 			const auto& it = g_loaded.items[g_restoreOrder[i]];
 			return std::format("{} {:X}", it.plugin, it.local);
 		}
+
+		// Build the loaded restore list through the workshop engine (player must be in build mode).
+		bool AutoBuild(std::monostate)
+		{
+			std::vector<Builder::Job> jobs;
+			{
+				std::scoped_lock l(g_lock);
+				for (auto idx : g_restoreOrder) {
+					const auto& it = g_loaded.items[idx];
+					auto* form = FindForm(it.plugin, it.local);
+					if (!form) {
+						continue;
+					}
+					jobs.push_back({ form->GetFormID(), it.x, it.y, it.z, it.az, std::format("{} {:X}", it.plugin, it.local) });
+				}
+			}
+			return !jobs.empty() && Builder::Start(std::move(jobs));
+		}
+
+		// [done, built, failed, total, running]
+		std::vector<std::int32_t> AutoBuildProgress(std::monostate)
+		{
+			return Builder::Progress();
+		}
+
+		void AutoBuildStop(std::monostate)
+		{
+			Builder::Stop();
+		}
 	}
 
 	std::filesystem::path DataFolder()
@@ -1062,6 +1092,9 @@ namespace OSB
 		vm->BindNativeMethod(obj, "GetRestoreForm", GetRestoreForm, true, false);
 		vm->BindNativeMethod(obj, "GetRestoreXform", GetRestoreXform, true, false);
 		vm->BindNativeMethod(obj, "GetRestoreName", GetRestoreName, true, false);
+		vm->BindNativeMethod(obj, "AutoBuild", AutoBuild, true, false);
+		vm->BindNativeMethod(obj, "AutoBuildProgress", AutoBuildProgress, true, false);
+		vm->BindNativeMethod(obj, "AutoBuildStop", AutoBuildStop, true, false);
 		REX::INFO("papyrus: OSB_Native registered (version {})", kVersion);
 	}
 }

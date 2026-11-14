@@ -60,3 +60,11 @@ Form Function GetRestoreForm(int aiIndex) global native
 ; [x, y, z, ax, ay, az, scale]
 float[] Function GetRestoreXform(int aiIndex) global native
 string Function GetRestoreName(int aiIndex) global native
+
+; ---- auto-build through the workshop engine ----
+; Build the list from LoadRestore like the player would (doors, walls, roofs, foundations come out right).
+; The player must be in build mode at the outpost. Returns false if it could not start.
+bool Function AutoBuild() global native
+; [done, built, failed, total, running(0/1)]
+int[] Function AutoBuildProgress() global native
+Function AutoBuildStop() global native
