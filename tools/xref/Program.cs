@@ -203,6 +203,43 @@ static class Program
                     }
                 break;
             }
+            case "vtname":
+            {
+                // vtables whose RTTI class name contains a[2]: prints vtable rva and the code that references it
+                string want = a[2];
+                var rdata = pe.Sections.First(s => s.name == ".rdata");
+                var hits = new List<(uint vt, string name)>();
+                for (uint o = 0; o + 8 <= rdata.rawSize; o += 8)
+                {
+                    ulong col = BitConverter.ToUInt64(pe.Data, (int)(rdata.raw + o));
+                    if (col < pe.ImageBase || col > pe.ImageBase + 0x10000000) continue;
+                    long cf = pe.ToFile((uint)(col - pe.ImageBase));
+                    if (cf < 0 || cf + 24 > pe.Data.Length) continue;
+                    if (BitConverter.ToUInt32(pe.Data, (int)cf) != 1 || BitConverter.ToUInt32(pe.Data, (int)cf + 20) != (uint)(col - pe.ImageBase)) continue;
+                    long tf = pe.ToFile(BitConverter.ToUInt32(pe.Data, (int)cf + 12) + 16);
+                    if (tf < 0) continue;
+                    int n = 0; while (tf + n < pe.Data.Length && pe.Data[tf + n] != 0 && n < 300) n++;
+                    string name = System.Text.Encoding.ASCII.GetString(pe.Data, (int)tf, n);
+                    if (name.Contains(want)) hits.Add((rdata.va + o + 8, name));
+                }
+                var targets = hits.Select(h => h.vt).ToHashSet();
+                var users = new Dictionary<uint, List<string>>();
+                foreach (var ins in pe.Decode(text.va, text.va + text.vsize))
+                {
+                    if (!ins.IsIPRelativeMemoryOperand) continue;
+                    uint t = (uint)(ins.IPRelativeMemoryAddress - pe.ImageBase);
+                    if (!targets.Contains(t)) continue;
+                    var f = pe.FuncOf((uint)(ins.IP - pe.ImageBase));
+                    if (!users.TryGetValue(t, out var l)) users[t] = l = new List<string>();
+                    l.Add($"{ins.IP - pe.ImageBase:X}(func {f.begin:X})");
+                }
+                foreach (var h in hits)
+                {
+                    ulong s1 = BitConverter.ToUInt64(pe.Data, (int)pe.ToFile(h.vt + 8));
+                    Console.WriteLine($"{h.vt:X8} {h.name}  slot1={s1 - pe.ImageBase:X}  used: {(users.TryGetValue(h.vt, out var u) ? string.Join(" ", u) : "-")}");
+                }
+                break;
+            }
             case "strs":
             {
                 // strings and calls referenced by each function given (comma separated rvas)
