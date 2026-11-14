@@ -8,6 +8,7 @@
 // Documents\My Games\Starfield\SFSE\Logs\OSBLanding.log.
 
 #include <cmath>
+#include <format>
 #include <filesystem>
 #include <fstream>
 #include <numbers>
@@ -81,6 +82,54 @@ namespace
 		return g_original(a_manager, a_out, a_planet, a_site);
 	}
 
+	// Write the real load order (from TESDataHandler) to <Starfield>\OSB_LoadOrder.txt, so backups can
+	// store "plugin name + local form ID" instead of load-order-dependent form IDs.
+	//   FULL   <hex 2> <file>   -> form IDs XX______
+	//   MEDIUM <hex 2> <file>   -> form IDs FDXX____
+	//   SMALL  <hex 3> <file>   -> form IDs FEXXX___
+	void DumpLoadOrder()
+	{
+		auto* dh = RE::TESDataHandler::GetSingleton();
+		if (!dh) {
+			REX::WARN("load order: TESDataHandler not available");
+			return;
+		}
+		const auto path = std::filesystem::current_path() / "OSB_LoadOrder.txt";
+		std::ofstream out(path, std::ios::trunc);
+		if (!out) {
+			REX::WARN("load order: cannot write {}", path.string());
+			return;
+		}
+		auto& c = dh->compiledFileCollection;
+		std::size_t n = 0;
+		auto put = [&](const char* kind, const std::string& idx, const RE::TESFile* f) {
+			if (f) {
+				out << kind << ' ' << idx << ' ' << f->fileName << '\n';
+				++n;
+			}
+		};
+		for (std::uint32_t i = 0; i < c.files.size(); ++i) {
+			const auto* f = c.files[i];
+			if (f) put("FULL", std::format("{:02X}", f->fileIndex.fullIndex), f);
+		}
+		for (std::uint32_t i = 0; i < c.mediumFiles.size(); ++i) {
+			const auto* f = c.mediumFiles[i];
+			if (f) put("MEDIUM", std::format("{:02X}", f->fileIndex.mediumIndex), f);
+		}
+		for (std::uint32_t i = 0; i < c.smallFiles.size(); ++i) {
+			const auto* f = c.smallFiles[i];
+			if (f) put("SMALL", std::format("{:03X}", f->fileIndex.smallIndex), f);
+		}
+		REX::INFO("load order: wrote {} plugins to {}", n, path.string());
+	}
+
+	void OnMessage(SFSE::MessagingInterface::Message* a_msg)
+	{
+		if (a_msg && a_msg->type == SFSE::MessagingInterface::kPostDataLoad) {
+			DumpLoadOrder();
+		}
+	}
+
 	template <std::size_t I>
 	void InstallOne()
 	{
@@ -112,5 +161,8 @@ SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 {
 	SFSE::Init(a_sfse, { .trampoline = true, .trampolineSize = 128 });
 	Install();
+	if (const auto* msg = SFSE::GetMessagingInterface(); !msg || !msg->RegisterListener(OnMessage)) {
+		REX::WARN("could not register for SFSE messages; OSB_LoadOrder.txt will not be written");
+	}
 	return true;
 }
