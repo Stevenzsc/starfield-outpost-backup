@@ -26,7 +26,7 @@ Message Function Msg(int aiLocalID)
 	return Game.GetFormFromFile(aiLocalID, "OutpostBackup.esp") as Message
 EndFunction
 
-Function Say(string asText)
+Function Notify(string asText)
 	Debug.Notification("Outpost Backup: " + asText)
 EndFunction
 
@@ -40,7 +40,7 @@ Event OnRead()
 		return
 	endif
 	if !OSB_Native.TryLock()
-		Say("still busy with the last action, please wait.")
+		Notify("still busy with the last action, please wait.")
 		return
 	endif
 	int flow = 0
@@ -70,15 +70,15 @@ EndFunction
 bool Function CheckOnSurface()
 	Actor player = Game.GetPlayer()
 	if player.IsInSpace() || player.GetCurrentPlanet() == None
-		Say("land on a planet first.")
+		Notify("land on a planet first.")
 		return false
 	endif
 	if player.IsInInterior()
-		Say("go outside first (not in a ship or building).")
+		Notify("go outside first (not in a ship or building).")
 		return false
 	endif
 	if player.IsInCombat()
-		Say("not during combat.")
+		Notify("not during combat.")
 		return false
 	endif
 	return true
@@ -133,7 +133,7 @@ bool Function PickBackup(bool abHereOnly)
 	endif
 	Message pick = Msg(kPickMsg)
 	if pick == None
-		Say("OutpostBackup.esp is out of date.")
+		Notify("OutpostBackup.esp is out of date.")
 		return false
 	endif
 	int page = 0
@@ -163,14 +163,14 @@ Function DoBackup()
 	ObjectReference beacon = OSB.FindBeacon()
 	Keyword kw = OSB.GetWorkshopItemKeyword()
 	if beacon == None || kw == None
-		Say("stand inside the outpost you want to back up.")
+		Notify("stand inside the outpost you want to back up.")
 		return
 	endif
 	if !OSB_Native.BeginBackup(beacon, beacon.GetPositionX(), beacon.GetPositionY(), beacon.GetPositionZ(), beacon.GetAngleZ())
-		Say("only works on a planet surface.")
+		Notify("only works on a planet surface.")
 		return
 	endif
-	Say("backing up, please wait...")
+	Notify("backing up, please wait...")
 	ObjectReference[] refs = beacon.GetRefsLinkedToMe(kw)
 	int i = 0
 	while refs && i < refs.Length
@@ -185,13 +185,13 @@ Function DoBackup()
 	endwhile
 	int n = OSB_Native.EndBackup()
 	if n < 0
-		Say("could not save the backup.")
+		Notify("could not save the backup.")
 	elseif n == 0
-		Say("this outpost has nothing to back up yet.")
+		Notify("this outpost has nothing to back up yet.")
 	elseif OSB_Native.LastBackupReplaced()
-		Say("updated the backup of this outpost (" + n + " objects).")
+		Notify("updated the backup of this outpost (" + n + " objects).")
 	else
-		Say("saved " + n + " objects.")
+		Notify("saved " + n + " objects.")
 	endif
 EndFunction
 
@@ -201,7 +201,7 @@ int Function DoLand()
 		return 0
 	endif
 	if !OSB_Native.ArmLanding()
-		Say("could not read that backup.")
+		Notify("could not read that backup.")
 		return 0
 	endif
 	int flow = OSB_Native.NewFlow()
@@ -209,12 +209,12 @@ int Function DoLand()
 	if IsOutsideOnPlanet() && spot && spot.Length >= 4 && spot[3] <= kMaxGuideMeters
 		return flow   ; already there: the flow moves you onto the spot
 	endif
-	string planet = OSB_Native.GetSelectedPlanetName()
+	string planetName = OSB_Native.GetSelectedPlanetName()
 	if Game.IsFarTravelControlsEnabled()
-		Debug.Notification("Outpost Backup: open " + planet + " in the star map and land anywhere on it.")
+		Debug.Notification("Outpost Backup: open " + planetName + " in the star map and land anywhere on it.")
 		Game.ShowGalaxyStarMapMenu()
 	else
-		Debug.MessageBox("Landing set.\n\nWhen you can travel again, open " + planet + " in the star map and land anywhere on it: your ship lands at the saved outpost.")
+		Debug.MessageBox("Landing set.\n\nWhen you can travel again, open " + planetName + " in the star map and land anywhere on it: your ship lands at the saved outpost.")
 	endif
 	return flow
 EndFunction
@@ -233,7 +233,7 @@ int Function DoRestore()
 	endif
 	float[] spot = OSB_Native.GetGuideSpot()
 	if spot == None || spot.Length < 4
-		Say("that outpost is on another planet.")
+		Notify("that outpost is on another planet.")
 		return 0
 	endif
 	if spot[3] > kMaxGuideMeters
@@ -276,7 +276,7 @@ Function RunFlow(int aiFlow)
 		Utility.Wait(kPollSeconds)
 		waited += kPollSeconds
 		if waited > kArriveTimeout
-			Say("stopped waiting for the landing. Choose Land again when you are ready.")
+			Notify("stopped waiting for the landing. Choose Land again when you are ready.")
 			return
 		endif
 	endwhile
@@ -296,7 +296,7 @@ ObjectReference Function WaitForBeacon(int aiFlow, float[] akSpot)
 			return b
 		endif
 	endwhile
-	Say("no beacon built. Choose Restore when the beacon is ready.")
+	Notify("no beacon built. Choose Restore when the beacon is ready.")
 	return None
 EndFunction
 
@@ -318,11 +318,11 @@ Function RestoreAt(ObjectReference akBeacon, float[] akSpot)
 
 	int n = OSB_Native.LoadRestore()
 	if n <= 0
-		Say("nothing to restore.")
+		Notify("nothing to restore.")
 		OSB_Native.Unlock()
 		return
 	endif
-	Say("restoring " + n + " objects...")
+	Notify("restoring " + n + " objects...")
 	int placed = 0
 	int missing = 0
 	int i = 0
@@ -343,7 +343,7 @@ Function RestoreAt(ObjectReference akBeacon, float[] akSpot)
 	if missing > 0
 		Debug.MessageBox("Restored " + placed + " of " + n + " objects.\n\n" + missing + " objects come from mods that are not installed now.")
 	else
-		Say("restored " + placed + " of " + n + " objects.")
+		Notify("restored " + placed + " of " + n + " objects.")
 	endif
 EndFunction
 
@@ -356,8 +356,8 @@ Function DoDelete()
 		return
 	endif
 	if OSB_Native.DeleteBackup()
-		Say("deleted " + name)
+		Notify("deleted " + name)
 	else
-		Say("could not delete that backup.")
+		Notify("could not delete that backup.")
 	endif
 EndFunction
