@@ -66,7 +66,7 @@ namespace
 				kSites[I].name, a_planet, a_site[1] * toDeg, a_site[0] * toDeg);
 
 			double lat = 0.0, lon = 0.0;
-			if (kSites[I].override && OSB::TakeArmedLanding(lat, lon)) {
+			if (kSites[I].override && OSB::TakeArmedLanding(a_planet, lat, lon)) {
 				// armed from the in-game slate
 				a_site[0] = lon / toDeg;
 				a_site[1] = lat / toDeg;
