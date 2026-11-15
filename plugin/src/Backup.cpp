@@ -28,6 +28,8 @@
 #include <ctime>
 #include <filesystem>
 #include <format>
+#include <unordered_map>
+#include <unordered_set>
 #include <fstream>
 #include <mutex>
 #include <numbers>
@@ -1258,9 +1260,8 @@ namespace OSB
 			return missing;
 		}
 
-		// Switch each wall in g_styleFixes to its saved style the way build mode's "change style" does
-		// (StateCycleSnapBehavior, 21B2030): 21F16B0(ref) = has styles, 21F0C30(out, ref) = next style,
-		// 21E48E0(ref, style) = apply. Steps through the styles until the wall's base is the saved one.
+		// One "change style" step for each wall in g_styleFixes, the way the player does it in build mode's select
+		// mode (point at the wall, press E). The script calls this once per round and looks again in between.
 		// Runs on the main thread (SFSE task). Returns how many walls it queued.
 		std::int32_t FixStyles(std::monostate)
 		{
@@ -1278,47 +1279,66 @@ namespace OSB
 				return 0;
 			}
 			tasks->AddTask([fixes]() {
-				using has_t = bool (*)(RE::TESObjectREFR*);
-				using next_t = void* (*)(void* a_out, RE::TESObjectREFR*);
-				using apply_t = void (*)(RE::TESObjectREFR*, void*);
-				const REL::Relocation<has_t> hasStyles{ REL::ID(121751) };   // +0x21F16B0
-				const REL::Relocation<next_t> nextStyle{ REL::ID(121746) };  // +0x21F0C30
-				const REL::Relocation<apply_t> applyStyle{ REL::ID(121634) };  // +0x21E48E0
+				// Like pressing "change" (E) on a wall in build mode's select mode: select the wall (engine +0x588,
+				// via the crosshair's setter 21DBC30), then run the CycleBehavior command (its TCmd's execute,
+				// 21BFBB0, with the same fields the input handler 21F4F30 fills in) - the engine then enters
+				// StateCycleSnapBehavior for the selected wall and switches it to its next style.
+				using select_t = std::uint8_t (*)(void* a_engine, std::uint32_t a_handle);
+				using exec_t = void (*)(void* a_cmd);
+				const REL::Relocation<select_t> select{ REL::ID(121611) };   // +0x21DBC30
+				const REL::Relocation<exec_t> exec{ REL::ID(121444) };       // +0x21BFBB0
+				auto* engine = reinterpret_cast<void*>(REL::ID(928921).address());      // +0x5F5D2E0
+				const auto ctx = REL::ID(928905).address();                             // +0x5F5CE40 (engine - 0x4A0)
+				const auto cmdVtbl = REL::ID(466560).address();                         // +0x4D49A50
+				const auto eventVtbl = REL::ID(467307).address();                       // +0x4D4B848
+				// reference -> handle: the handle table (manager at +0x5E60380: entries {object, tag} at +0x50,
+				// index mask at +0x68); handle = index | (tag & ~mask)
+				const auto mgr = *reinterpret_cast<std::uintptr_t*>(REL::ID(883285).address());
+				std::unordered_map<std::uintptr_t, std::uint32_t> handles;
+				std::unordered_set<std::uintptr_t> wanted;
+				for (const auto& f : fixes) {
+					if (auto* ref = RE::TESForm::LookupByID(f.ref)) {
+						wanted.insert(reinterpret_cast<std::uintptr_t>(ref));
+					}
+				}
+				if (mgr) {
+					const auto mask = *reinterpret_cast<std::uint32_t*>(mgr + 0x68);
+					const auto table = *reinterpret_cast<std::uintptr_t*>(mgr + 0x50);
+					for (std::uint64_t i = 1; table && i <= mask && handles.size() < wanted.size(); ++i) {
+						const auto obj = *reinterpret_cast<std::uintptr_t*>(table + i * 16);
+						if (obj && wanted.contains(obj)) {
+							const auto tag = *reinterpret_cast<std::uint32_t*>(table + i * 16 + 8);
+							handles[obj] = std::uint32_t(i) | (tag & ~mask);
+						}
+					}
+				}
 				for (const auto& f : fixes) {
 					auto* ref = static_cast<RE::TESObjectREFR*>(RE::TESForm::LookupByID(f.ref));
 					if (!ref) {
 						REX::INFO("styles: {} wall {:08X} is gone", f.name, f.ref);
 						continue;
 					}
-					std::string steps;
-					bool done = false;
-					// one style step per call: the wall is swapped on a later frame, so the script checks again in
-					// between (ReportRefs, ReportParts) and calls this again
-					for (int i = 0; i < 1 && !done; ++i) {
-						const auto base = ref->GetBaseObject();
-						const auto id = base ? base->GetFormID() : 0;
-						steps += std::format(" {:08X}", id);
-						if (id == f.want) {
-							done = true;
-							break;
-						}
-						if (!hasStyles(ref)) {
-							steps += " (no styles)";
-							break;
-						}
-						struct
-						{
-							void* style{ nullptr };
-							std::uint64_t flags{ 0 };
-						} out;
-						nextStyle(&out, ref);
-						if (!out.style) {
-							steps += " (no next style)";
-							break;
-						}
-						applyStyle(ref, out.style);
+					const auto base = ref->GetBaseObject();
+					const auto id = base ? base->GetFormID() : 0;
+					if (id == f.want) {
+						REX::INFO("styles: {} wall {:08X} is {:08X}: done", f.name, f.ref, id);
+						continue;
 					}
-					REX::INFO("styles: {} wall {:08X} want {:08X}:{} -> {}", f.name, f.ref, f.want, steps, done ? "done" : "not reached");
+					const auto h = handles.find(reinterpret_cast<std::uintptr_t>(ref));
+					if (h == handles.end()) {
+						REX::INFO("styles: {} wall {:08X} ({:08X}): no handle", f.name, f.ref, id);
+						continue;
+					}
+					select(engine, h->second);
+					struct
+					{
+						std::uintptr_t vtbl, fn, ctx, eventVtbl;
+						std::uint8_t eventByte, pad[7];
+					} cmd{ cmdVtbl, REL::ID(121444).address(), ctx, eventVtbl, 0, {} };
+					exec(&cmd);
+					const auto after = ref->GetBaseObject();
+					REX::INFO("styles: {} wall {:08X} handle {:08X}: {:08X} -> change -> {:08X}, want {:08X}", f.name, f.ref, h->second, id,
+						after ? after->GetFormID() : 0, f.want);
 				}
 			});
 			return std::int32_t(fixes.size());
