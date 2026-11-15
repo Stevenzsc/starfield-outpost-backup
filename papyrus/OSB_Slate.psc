@@ -207,7 +207,8 @@ Function DoBackup()
 		ObjectReference r = refs[i]
 		if r && r != beacon
 			Form base = r.GetBaseObject()
-			if OSB_Native.IsBuildable(base) && !OSB.IsSkippedBase(base) && !OnBeacon(r, beacon)
+			; habs without a recipe of their own (build menu variants) are PackIns: keep every PackIn, the restore asks the build menu
+			if (OSB_Native.IsBuildable(base) || (base as PackIn)) && !OSB.IsSkippedBase(base) && !OnBeacon(r, beacon)
 				OSB_Native.AddItem(base, r.GetPositionX(), r.GetPositionY(), r.GetPositionZ(), r.GetAngleX(), r.GetAngleY(), r.GetAngleZ(), r.GetScale(), (base as PackIn) != None, r.GetFormID())
 			endif
 		endif

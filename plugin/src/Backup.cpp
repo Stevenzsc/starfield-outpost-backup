@@ -646,7 +646,7 @@ namespace OSB
 				return false;
 			}
 			std::scoped_lock l(g_lock);
-			if (!IsBuildable(a_base)) {
+			if (!IsBuildable(a_base) && !a_pack) {   // PackIns stay: vanilla habs are build menu variants without a recipe
 				++g_skipped;   // part spawned by a hab or other object; comes back with its parent
 				return false;
 			}
