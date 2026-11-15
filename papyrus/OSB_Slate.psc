@@ -480,11 +480,18 @@ bool Function AutoBuildAt(ObjectReference akBeacon, int aiCount)
 	if !(p && p.Length >= 6 && p[5] == 1)
 		; still in build mode: switch walls to their saved door / window style, like "change style" by hand
 		Notify("setting door and window styles...")
-		OSB_Native.ReportRefs(akBeacon.GetRefsLinkedToMe(OSB.GetWorkshopItemKeyword()))
-		OSB_Native.ReportParts()
-		if OSB_Native.FixStyles() > 0
-			Utility.Wait(2.0)
-		endif
+		; one style step per round; the wall changes on a later frame, so look again before the next step
+		int round = 0
+		while round < 8
+			OSB_Native.ReportRefs(akBeacon.GetRefsLinkedToMe(OSB.GetWorkshopItemKeyword()))
+			OSB_Native.ReportParts()
+			if OSB_Native.FixStyles() > 0
+				Utility.Wait(1.0)
+				round += 1
+			else
+				round = 8
+			endif
+		endwhile
 	endif
 	akBeacon.StartWorkshop(false)
 	if p && p.Length >= 6 && p[5] == 1

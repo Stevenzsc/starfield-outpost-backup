@@ -1200,7 +1200,8 @@ namespace OSB
 					}
 					auto* pf = RE::TESForm::LookupByID(p.base);
 					const bool isPack = pf && pf->GetFormType() == form->GetFormType();
-					if (isPack && sameAngle && d < 0.3f && !slot) {
+					// only hab walls: a hab or anything else from the build menu is not a style of a wall
+					if (isPack && sameAngle && d < 0.3f && !slot && !Builder::InBuildMenu(want) && !Builder::InBuildMenu(p.base)) {
 						slot = &p;
 					}
 					if (d < otherDist) {
@@ -1261,7 +1262,9 @@ namespace OSB
 					}
 					std::string steps;
 					bool done = false;
-					for (int i = 0; i < 8 && !done; ++i) {
+					// one style step per call: the wall is swapped on a later frame, so the script checks again in
+					// between (ReportRefs, ReportParts) and calls this again
+					for (int i = 0; i < 1 && !done; ++i) {
 						const auto base = ref->GetBaseObject();
 						const auto id = base ? base->GetFormID() : 0;
 						steps += std::format(" {:08X}", id);
