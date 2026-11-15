@@ -488,6 +488,17 @@ bool Function AutoBuildAt(ObjectReference akBeacon, int aiCount)
 	if moved > 0
 		Notify("moved " + moved + " misplaced parts back to their saved spot.")
 	endif
+	; compare the outpost as it is now with the backup (habs, walls with their door / window style); see the log
+	OSB_Native.ReportBegin()
+	ObjectReference[] now = akBeacon.GetRefsLinkedToMe(OSB.GetWorkshopItemKeyword())
+	int k = 0
+	while now && k < now.Length
+		ObjectReference r = now[k]
+		if r
+			OSB_Native.ReportAddRef(r.GetBaseObject(), r.GetPositionX(), r.GetPositionY(), r.GetPositionZ(), r.GetAngleZ())
+		endif
+		k += 1
+	endwhile
 	OSB_Native.ReportParts()
 	lock.Delete()
 	if p && p.Length >= 5

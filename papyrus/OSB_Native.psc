@@ -77,3 +77,6 @@ Form Function CorrectionRef(int aiIndex) global native
 float[] Function CorrectionXform(int aiIndex) global native
 ; Logs the backup's hab parts (walls with their door / window style...) that are not where they were; returns how many
 int Function ReportParts() global native
+; list the outpost as it is now for ReportParts
+Function ReportBegin() global native
+Function ReportAddRef(Form akBase, float afX, float afY, float afZ, float afAZ) global native

@@ -180,14 +180,36 @@ namespace OSB::Builder
 		using SnapSearch_t = std::uintptr_t (*)(void* a_engine);
 		SnapSearch_t g_snapSearch = nullptr;
 		std::atomic<bool> g_logSnap{ false };
+		std::atomic<bool> g_logSnapSearch{ false };
 
 		std::uintptr_t SnapSearchHook(void* a_engine)
 		{
-			const auto r = g_snapSearch(a_engine);
 			if (!g_forcing.load()) {
-				return r;
+				return g_snapSearch(a_engine);
 			}
 			const auto e = reinterpret_cast<std::uintptr_t>(a_engine);
+			// The search casts a ray from the preview (+0x138) along the camera's forward (+0xC0) and snaps to the
+			// hab it hits. The player's camera points anywhere: cast straight down from 1.5 m above the saved spot
+			// instead, so an upper floor finds the roof under it and a ground hab the ground.
+			auto* dir = reinterpret_cast<float*>(e + 0xC0);
+			auto* pos = reinterpret_cast<float*>(e + kPreviewPos);
+			const float oldDir[3] = { dir[0], dir[1], dir[2] };
+			const float oldZ = pos[2];
+			dir[0] = 0.0f;
+			dir[1] = 0.0f;
+			dir[2] = -1.0f;
+			pos[2] = oldZ + 1.5f;
+			if (g_logSnapSearch.exchange(false)) {
+				REX::INFO("builder: snap search from {:.2f} {:.2f} {:.2f} straight down (camera forward was {:.2f} {:.2f} {:.2f})", pos[0], pos[1], pos[2],
+					oldDir[0], oldDir[1], oldDir[2]);
+			}
+			const auto r = g_snapSearch(a_engine);
+			dir[0] = oldDir[0];
+			dir[1] = oldDir[1];
+			dir[2] = oldDir[2];
+			if (pos[2] == oldZ + 1.5f) {   // not moved to a snap point: back to where it was
+				pos[2] = oldZ;
+			}
 			auto& snapped = *reinterpret_cast<std::uint8_t*>(e + 0x188);
 			if (!snapped) {
 				return r;
@@ -508,6 +530,7 @@ namespace OSB::Builder
 			g_logAim = true;
 			g_logFoundation = true;
 			g_logSnap = true;
+			g_logSnapSearch = true;
 			PostNewItem(a_entry, a_job.formID);
 			const bool got = WaitFor([&] { return CurrentItem() && CurrentItem() != before; }, 3000);
 			if (got) {
@@ -603,6 +626,9 @@ namespace OSB::Builder
 			std::scoped_lock l(g_placedLock);
 			for (const auto& r : a_refs) {
 				Correction m{ r.ref };
+				if (a_refs.size() == 1 && r.base == 0x15804) {
+					break;   // a hab reports only its group dummy, not its walls: moving the dummy alone does nothing
+				}
 				if (a_refs.size() == 1) {
 					m.x = a_job.x; m.y = a_job.y; m.z = a_job.z;
 					m.ax = a_job.axDeg; m.ay = a_job.ayDeg; m.az = a_job.yawDeg;
@@ -767,6 +793,8 @@ namespace OSB::Builder
 		g_update = HookCall<Update_t>(kStateUpdatePlacement, kUpdateCallOff, &UpdateHook, "placement update (21D74B0)");
 		g_foundation = HookCall<Foundation_t>(kStateUpdateFoundation, kFoundationCallOff, &FoundationHook, "foundation height (21D5CE0)");
 		g_snapSearch = HookCall<SnapSearch_t>(kUpdatePlacement, 0x6C4, &SnapSearchHook, "snap search (21D2E20)");
+		HookCall<SnapSearch_t>(kUpdatePlacement, 0xCE8, &SnapSearchHook, "snap search 2 (21D2E20)");
+		HookCall<SnapSearch_t>(kUpdatePlacement, 0xDE8, &SnapSearchHook, "snap search 3 (21D2E20)");
 		HookSnapEvent();
 		HookSlot<0>(REL::ID(466620), 0xB8 / 8, "StateUpdatePlacement commit (21B2E20)");
 		HookSlot<1>(REL::ID(466892), 0xB8 / 8, "StateUpdateAutoFoundation commit (21B2360)");

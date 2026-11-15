@@ -1113,12 +1113,27 @@ namespace OSB
 			return { c.x, c.y, c.z, c.ax, c.ay, c.az };
 		}
 
+		// The outpost as it is after the build, listed by the script (like a backup): base, position, angle z (deg)
+		std::vector<Builder::Placed> g_now;
+
+		void ReportBegin(std::monostate)
+		{
+			g_now.clear();
+		}
+
+		void ReportAddRef(std::monostate, RE::TESForm* a_base, float x, float y, float z, float az)
+		{
+			if (a_base) {
+				g_now.push_back({ 0, a_base->GetFormID(), x, y, z, 0, 0, az * std::numbers::pi_v<float> / 180.0f });
+			}
+		}
+
 		// Compare the backup's PackIns (habs, hab walls with their door / window style, corridors) with what the
-		// build placed, after the corrections. Logs each saved part that is not there, and what is there instead.
+		// outpost now has (ReportBegin/ReportAddRef). Logs each saved part that is not there, and what is there instead.
 		// Returns how many are not there.
 		std::int32_t ReportParts(std::monostate)
 		{
-			const auto placed = Builder::PlacedRefs();
+			const auto& placed = g_now;
 			std::scoped_lock l(g_lock);
 			std::int32_t missing = 0, found = 0;
 			for (const auto& it : g_loaded.items) {
@@ -1226,6 +1241,8 @@ namespace OSB
 		vm->BindNativeMethod(obj, "CorrectionRef", CorrectionRef, true, false);
 		vm->BindNativeMethod(obj, "CorrectionXform", CorrectionXform, true, false);
 		vm->BindNativeMethod(obj, "ReportParts", ReportParts, true, false);
+		vm->BindNativeMethod(obj, "ReportBegin", ReportBegin, true, false);
+		vm->BindNativeMethod(obj, "ReportAddRef", ReportAddRef, true, false);
 		vm->BindNativeMethod(obj, "IsPlacing", IsPlacing, true, false);
 		REX::INFO("papyrus: OSB_Native registered (version {})", kVersion);
 	}
