@@ -1312,6 +1312,20 @@ namespace OSB
 						}
 					}
 				}
+				// the command only runs when the workshop is idle: nothing in hand (+0x268), gate byte ctx+0x1009 set
+				const auto e = reinterpret_cast<std::uintptr_t>(engine);
+				const auto state = *reinterpret_cast<std::uintptr_t*>(ctx + 0x490);
+				const auto stateVtbl = state ? *reinterpret_cast<std::uintptr_t*>(state) : 0;
+				const auto base = REL::ID(928921).address() - 0x5F5D2E0;   // image base, from the engine's known offset
+				REX::INFO("styles: workshop gate {} {}, item in hand {:X}, state object {:X} vtable +{:X}",
+					*reinterpret_cast<std::uint8_t*>(ctx + 0x1009), *reinterpret_cast<std::uint8_t*>(ctx + 0x1008),
+					*reinterpret_cast<std::uintptr_t*>(e + 0x268), state, stateVtbl ? stateVtbl - base : 0);
+				if (*reinterpret_cast<std::uintptr_t*>(e + 0x268)) {
+					using cancel_t = void (*)();
+					REL::Relocation<cancel_t>{ REL::ID(121378) }();   // drop it; the next round finds the workshop idle
+					REX::INFO("styles: an item is in hand: cancelled it, trying again next round");
+					return;
+				}
 				for (const auto& f : fixes) {
 					auto* ref = static_cast<RE::TESObjectREFR*>(RE::TESForm::LookupByID(f.ref));
 					if (!ref) {
