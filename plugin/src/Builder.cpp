@@ -87,6 +87,8 @@ namespace OSB::Builder
 		};
 		std::mutex g_targetLock;
 		float g_tx = 0, g_ty = 0, g_tz = 0, g_tyaw = 0;
+		float g_hx = 0, g_hy = 0;                    // half the bounds of the object being built (local x, y)
+		int g_snapTry = 0, g_snapOrigin = -1, g_snapCurrent = 0;   // snap ray origin cycling (see SnapSearchHook)
 
 		std::atomic<bool> g_running{ false };
 		std::atomic<bool> g_stop{ false };
@@ -194,21 +196,40 @@ namespace OSB::Builder
 			auto* dir = reinterpret_cast<float*>(e + 0xC0);
 			auto* pos = reinterpret_cast<float*>(e + kPreviewPos);
 			const float oldDir[3] = { dir[0], dir[1], dir[2] };
-			const float oldZ = pos[2];
+			const float old[3] = { pos[0], pos[1], pos[2] };
+			// A corridor joins two habs: straight down from its middle hits the ground between them. Until a
+			// snap lands on the saved spot, also try straight down at each end (over a hab's doorway): the
+			// origin cycles middle, +x, -x, +y, -y (local axes, half the bounds), a few frames each.
+			float ox = 0, oy = 0;
+			{
+				std::scoped_lock l(g_targetLock);
+				int k = g_snapOrigin >= 0 ? g_snapOrigin : (g_snapTry++ / 3) % 5;
+				g_snapCurrent = k;
+				const float lx = k == 1 ? g_hx : k == 2 ? -g_hx : 0.0f;
+				const float ly = k == 3 ? g_hy : k == 4 ? -g_hy : 0.0f;
+				const float c = std::cos(g_tyaw), s = std::sin(g_tyaw);
+				ox = lx * c + ly * s;
+				oy = -lx * s + ly * c;
+			}
 			dir[0] = 0.0f;
 			dir[1] = 0.0f;
 			dir[2] = -1.0f;
-			pos[2] = oldZ + 1.5f;
+			pos[0] = old[0] + ox;
+			pos[1] = old[1] + oy;
+			pos[2] = old[2] + 1.5f;
 			if (g_logSnapSearch.exchange(false)) {
 				REX::INFO("builder: snap search from {:.2f} {:.2f} {:.2f} straight down (camera forward was {:.2f} {:.2f} {:.2f})", pos[0], pos[1], pos[2],
 					oldDir[0], oldDir[1], oldDir[2]);
 			}
+			const float cast[3] = { pos[0], pos[1], pos[2] };
 			const auto r = g_snapSearch(a_engine);
 			dir[0] = oldDir[0];
 			dir[1] = oldDir[1];
 			dir[2] = oldDir[2];
-			if (pos[2] == oldZ + 1.5f) {   // not moved to a snap point: back to where it was
-				pos[2] = oldZ;
+			if (pos[0] == cast[0] && pos[1] == cast[1] && pos[2] == cast[2]) {   // not moved to a snap point: back
+				pos[0] = old[0];
+				pos[1] = old[1];
+				pos[2] = old[2];
 			}
 			auto& snapped = *reinterpret_cast<std::uint8_t*>(e + 0x188);
 			if (!snapped) {
@@ -221,9 +242,12 @@ namespace OSB::Builder
 				tx = g_tx; ty = g_ty; tz = g_tz;
 			}
 			const bool match = std::abs(p[0] - tx) < 1.0f && std::abs(p[1] - ty) < 1.0f && std::abs(p[2] - tz) < 1.0f;
-			if (g_logSnap.exchange(false)) {
-				REX::INFO("builder: snap found at {:.2f} {:.2f} {:.2f}, saved {:.2f} {:.2f} {:.2f}: {}", p[0], p[1], p[2], tx, ty, tz,
+			if (g_logSnap.exchange(false) || (match && g_snapOrigin < 0)) {
+				REX::INFO("builder: snap found at {:.2f} {:.2f} {:.2f} (cast {}), saved {:.2f} {:.2f} {:.2f}: {}", p[0], p[1], p[2], g_snapCurrent, tx, ty, tz,
 					match ? "using it" : "ignoring it");
+			}
+			if (match) {
+				g_snapOrigin = g_snapCurrent;   // keep casting from there
 			}
 			if (!match) {
 				snapped = 0;
@@ -524,6 +548,10 @@ namespace OSB::Builder
 				g_ty = a_job.y;
 				g_tz = a_job.z;
 				g_tyaw = a_job.yawDeg * std::numbers::pi_v<float> / 180.0f;
+				g_hx = a_job.hx;
+				g_hy = a_job.hy;
+				g_snapTry = 0;
+				g_snapOrigin = -1;
 			}
 			void* before = CurrentItem();
 			g_lockZ = g_forceAll.load() && a_job.size < kSmallObject;

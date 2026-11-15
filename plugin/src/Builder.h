@@ -17,6 +17,7 @@ namespace OSB::Builder
 		float size{};                // footprint (m^2) from the base bounds; bigger objects are built first
 		std::uint32_t order{ 0 };    // reference form ID at backup time (rises in build order), 0 if unknown
 		float axDeg{}, ayDeg{};      // ObjectReference.GetAngleX/Y()
+		float hx{}, hy{};            // half the base bounds along local x and y (m)
 	};
 
 	// A reference the build placed (angles in radians, as the engine keeps them).

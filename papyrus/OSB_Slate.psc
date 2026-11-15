@@ -477,6 +477,15 @@ bool Function AutoBuildAt(ObjectReference akBeacon, int aiCount)
 			Notify("building... " + p[0] + " of " + p[3])
 		endif
 	endwhile
+	if !(p && p.Length >= 6 && p[5] == 1)
+		; still in build mode: switch walls to their saved door / window style, like "change style" by hand
+		Notify("setting door and window styles...")
+		OSB_Native.ReportRefs(akBeacon.GetRefsLinkedToMe(OSB.GetWorkshopItemKeyword()))
+		OSB_Native.ReportParts()
+		if OSB_Native.FixStyles() > 0
+			Utility.Wait(2.0)
+		endif
+	endif
 	akBeacon.StartWorkshop(false)
 	if p && p.Length >= 6 && p[5] == 1
 		int removed = UndoBuild(akBeacon, before)

@@ -81,3 +81,4 @@ int Function ReportParts() global native
 Function ReportBegin() global native
 Function ReportAddRef(Form akBase, float afX, float afY, float afZ, float afAZ) global native
 Function ReportRefs(ObjectReference[] akRefs) global native
+int Function FixStyles() global native

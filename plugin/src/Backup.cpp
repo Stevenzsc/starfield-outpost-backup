@@ -1063,7 +1063,9 @@ namespace OSB
 					if (!std::isfinite(size) || size < 0 || size > 1e6f) {
 						size = 0;
 					}
-					jobs.push_back({ form->GetFormID(), it.x, it.y, it.z, it.az, std::format("{} {:X}", it.plugin, it.local), size, it.ref, it.ax, it.ay });
+					const float hx = std::isfinite(b[3] - b[0]) ? std::abs(b[3] - b[0]) / 2 : 0.0f;
+					const float hy = std::isfinite(b[4] - b[1]) ? std::abs(b[4] - b[1]) / 2 : 0.0f;
+					jobs.push_back({ form->GetFormID(), it.x, it.y, it.z, it.az, std::format("{} {:X}", it.plugin, it.local), size, it.ref, it.ax, it.ay, hx, hy });
 				}
 			}
 			return !jobs.empty() && Builder::Start(std::move(jobs));
@@ -1146,14 +1148,30 @@ namespace OSB
 			}
 		}
 
+		// wall slots whose style differs from the backup: the wall there now, and the style (PackIn) it should be
+		struct StyleFix
+		{
+			std::uint32_t ref{ 0 }, want{ 0 };
+			std::string name;
+		};
+		std::vector<StyleFix> g_styleFixes;
+
+		float AngleDiffDeg(float a_deg, float b_deg)
+		{
+			return std::abs(std::remainder(a_deg - b_deg, 360.0f));
+		}
+
 		// Compare the backup's PackIns (habs, hab walls with their door / window style, corridors) with what the
-		// outpost now has (ReportBegin/ReportAddRef). Logs each saved part that is not there, and what is there instead.
+		// outpost now has (ReportRefs). Logs each saved part that is not there and what is there instead, and collects
+		// the walls that are there with another style (g_styleFixes, for FixStyles).
 		// Returns how many are not there.
 		std::int32_t ReportParts(std::monostate)
 		{
 			const auto& placed = g_now;
 			std::scoped_lock l(g_lock);
+			g_styleFixes.clear();
 			std::int32_t missing = 0, found = 0;
+			constexpr float toDeg = 180.0f / std::numbers::pi_v<float>;
 			for (const auto& it : g_loaded.items) {
 				if (!it.pack) {
 					continue;
@@ -1164,18 +1182,28 @@ namespace OSB
 				}
 				const auto want = form->GetFormID();
 				const Builder::Placed* same = nullptr;
-				const Builder::Placed* other = nullptr;
+				const Builder::Placed* slot = nullptr;    // another PackIn at the same spot and angle: the same wall, other style
+				const Builder::Placed* other = nullptr;   // anything else nearby, for the log
 				float otherDist = 0.5f;
 				for (const auto& p : placed) {
 					const float d = std::hypot(p.x - it.x, p.y - it.y);
-					if (std::abs(p.z - it.z) > 0.5f) {
+					if (std::abs(p.z - it.z) > 0.5f || d > 0.5f) {
 						continue;
 					}
+					const bool sameAngle = AngleDiffDeg(p.az * toDeg, it.az) < 10.0f;
 					if (p.base == want && d < 0.3f) {
 						same = &p;
 						break;
 					}
-					if (p.base != want && p.base != 0x15804 && d < otherDist) {
+					if (p.base == want || p.base == 0x15804) {
+						continue;
+					}
+					auto* pf = RE::TESForm::LookupByID(p.base);
+					const bool isPack = pf && pf->GetFormType() == form->GetFormType();
+					if (isPack && sameAngle && d < 0.3f && !slot) {
+						slot = &p;
+					}
+					if (d < otherDist) {
 						other = &p;
 						otherDist = d;
 					}
@@ -1185,13 +1213,82 @@ namespace OSB
 					continue;
 				}
 				++missing;
-				auto* otherForm = other ? RE::TESForm::LookupByID(other->base) : nullptr;
-				REX::INFO("parts: saved {} {:X} '{}' at {:.2f} {:.2f} {:.2f} angle {:.0f}: not there{}", it.plugin, it.local, FormName(form), it.x, it.y,
+				const auto* shown = slot ? slot : other;
+				auto* shownForm = shown ? RE::TESForm::LookupByID(shown->base) : nullptr;
+				REX::INFO("parts: saved {} {:X} '{}' at {:.2f} {:.2f} {:.2f} angle {:.0f}: not there{}{}", it.plugin, it.local, FormName(form), it.x, it.y,
 					it.z, it.az,
-					other ? std::format(", instead {:08X} '{}' angle {:.0f}", other->base, FormName(otherForm), other->az * 180.0f / std::numbers::pi_v<float>) : "");
+					shown ? std::format(", instead {:08X} '{}' angle {:.0f}", shown->base, FormName(shownForm), shown->az * toDeg) : "",
+					slot ? " (same wall, other style: will switch)" : "");
+				if (slot) {
+					g_styleFixes.push_back({ slot->ref, want, std::format("{} {:X}", it.plugin, it.local) });
+				}
 			}
-			REX::INFO("parts: {} of {} saved PackIns are there, {} are not", found, found + missing, missing);
+			REX::INFO("parts: {} of {} saved PackIns are there, {} are not ({} walls to switch style)", found, found + missing, missing, g_styleFixes.size());
 			return missing;
+		}
+
+		// Switch each wall in g_styleFixes to its saved style the way build mode's "change style" does
+		// (StateCycleSnapBehavior, 21B2030): 21F16B0(ref) = has styles, 21F0C30(out, ref) = next style,
+		// 21E48E0(ref, style) = apply. Steps through the styles until the wall's base is the saved one.
+		// Runs on the main thread (SFSE task). Returns how many walls it queued.
+		std::int32_t FixStyles(std::monostate)
+		{
+			std::vector<StyleFix> fixes;
+			{
+				std::scoped_lock l(g_lock);
+				fixes = g_styleFixes;
+			}
+			if (fixes.empty()) {
+				return 0;
+			}
+			const auto* tasks = SFSE::GetTaskInterface();
+			if (!tasks) {
+				REX::WARN("styles: no SFSE task interface");
+				return 0;
+			}
+			tasks->AddTask([fixes]() {
+				using has_t = bool (*)(RE::TESObjectREFR*);
+				using next_t = void* (*)(void* a_out, RE::TESObjectREFR*);
+				using apply_t = void (*)(RE::TESObjectREFR*, void*);
+				const REL::Relocation<has_t> hasStyles{ REL::ID(121751) };   // +0x21F16B0
+				const REL::Relocation<next_t> nextStyle{ REL::ID(121746) };  // +0x21F0C30
+				const REL::Relocation<apply_t> applyStyle{ REL::ID(121634) };  // +0x21E48E0
+				for (const auto& f : fixes) {
+					auto* ref = static_cast<RE::TESObjectREFR*>(RE::TESForm::LookupByID(f.ref));
+					if (!ref) {
+						REX::INFO("styles: {} wall {:08X} is gone", f.name, f.ref);
+						continue;
+					}
+					std::string steps;
+					bool done = false;
+					for (int i = 0; i < 8 && !done; ++i) {
+						const auto base = ref->GetBaseObject();
+						const auto id = base ? base->GetFormID() : 0;
+						steps += std::format(" {:08X}", id);
+						if (id == f.want) {
+							done = true;
+							break;
+						}
+						if (!hasStyles(ref)) {
+							steps += " (no styles)";
+							break;
+						}
+						struct
+						{
+							void* style{ nullptr };
+							std::uint64_t flags{ 0 };
+						} out;
+						nextStyle(&out, ref);
+						if (!out.style) {
+							steps += " (no next style)";
+							break;
+						}
+						applyStyle(ref, out.style);
+					}
+					REX::INFO("styles: {} wall {:08X} want {:08X}:{} -> {}", f.name, f.ref, f.want, steps, done ? "done" : "not reached");
+				}
+			});
+			return std::int32_t(fixes.size());
 		}
 	}
 
@@ -1262,6 +1359,7 @@ namespace OSB
 		vm->BindNativeMethod(obj, "ReportBegin", ReportBegin, true, false);
 		vm->BindNativeMethod(obj, "ReportAddRef", ReportAddRef, true, false);
 		vm->BindNativeMethod(obj, "ReportRefs", ReportRefs, true, false);
+		vm->BindNativeMethod(obj, "FixStyles", FixStyles, true, false);
 		vm->BindNativeMethod(obj, "IsPlacing", IsPlacing, true, false);
 		REX::INFO("papyrus: OSB_Native registered (version {})", kVersion);
 	}
