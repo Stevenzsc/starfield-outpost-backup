@@ -1128,6 +1128,24 @@ namespace OSB
 			}
 		}
 
+		// the whole outpost in one call (one Papyrus call per reference took about a minute)
+		void ReportRefs(std::monostate, std::vector<RE::TESObjectREFR*> a_refs)
+		{
+			g_now.clear();
+			for (auto* r : a_refs) {
+				if (!r) {
+					continue;
+				}
+				const auto base = r->GetBaseObject();
+				if (!base) {
+					continue;
+				}
+				const auto p = r->GetPosition();
+				const auto a = r->GetAngle();
+				g_now.push_back({ r->GetFormID(), base->GetFormID(), p.x, p.y, p.z, a.x, a.y, a.z });
+			}
+		}
+
 		// Compare the backup's PackIns (habs, hab walls with their door / window style, corridors) with what the
 		// outpost now has (ReportBegin/ReportAddRef). Logs each saved part that is not there, and what is there instead.
 		// Returns how many are not there.
@@ -1243,6 +1261,7 @@ namespace OSB
 		vm->BindNativeMethod(obj, "ReportParts", ReportParts, true, false);
 		vm->BindNativeMethod(obj, "ReportBegin", ReportBegin, true, false);
 		vm->BindNativeMethod(obj, "ReportAddRef", ReportAddRef, true, false);
+		vm->BindNativeMethod(obj, "ReportRefs", ReportRefs, true, false);
 		vm->BindNativeMethod(obj, "IsPlacing", IsPlacing, true, false);
 		REX::INFO("papyrus: OSB_Native registered (version {})", kVersion);
 	}

@@ -484,23 +484,16 @@ bool Function AutoBuildAt(ObjectReference akBeacon, int aiCount)
 		Debug.MessageBox("Restore cancelled.\n\nRemoved the " + removed + " objects it had built; the outpost is as before.")
 		return true
 	endif
+	; give the player back control first, then tidy up
+	lock.Delete()
+	Notify("build done, checking positions...")
 	int moved = ApplyCorrections()
 	if moved > 0
 		Notify("moved " + moved + " misplaced parts back to their saved spot.")
 	endif
 	; compare the outpost as it is now with the backup (habs, walls with their door / window style); see the log
-	OSB_Native.ReportBegin()
-	ObjectReference[] now = akBeacon.GetRefsLinkedToMe(OSB.GetWorkshopItemKeyword())
-	int k = 0
-	while now && k < now.Length
-		ObjectReference r = now[k]
-		if r
-			OSB_Native.ReportAddRef(r.GetBaseObject(), r.GetPositionX(), r.GetPositionY(), r.GetPositionZ(), r.GetAngleZ())
-		endif
-		k += 1
-	endwhile
+	OSB_Native.ReportRefs(akBeacon.GetRefsLinkedToMe(OSB.GetWorkshopItemKeyword()))
 	OSB_Native.ReportParts()
-	lock.Delete()
 	if p && p.Length >= 5
 		if p[2] > 0
 			Debug.MessageBox("Built " + p[1] + " of " + p[3] + " objects.\n\n" + p[2] + " could not be built (not in the build menu, e.g. a mod that is not installed).")

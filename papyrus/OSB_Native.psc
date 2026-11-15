@@ -80,3 +80,4 @@ int Function ReportParts() global native
 ; list the outpost as it is now for ReportParts
 Function ReportBegin() global native
 Function ReportAddRef(Form akBase, float afX, float afY, float afZ, float afAZ) global native
+Function ReportRefs(ObjectReference[] akRefs) global native
