@@ -1224,7 +1224,37 @@ namespace OSB
 					g_styleFixes.push_back({ slot->ref, want, std::format("{} {:X}", it.plugin, it.local) });
 				}
 			}
-			REX::INFO("parts: {} of {} saved PackIns are there, {} are not ({} walls to switch style)", found, found + missing, missing, g_styleFixes.size());
+			// the other way round: hab walls the outpost has now on a spot and side where the backup had none
+			// (a door or window opened on the wrong side shows up here, or in the list above as the saved plain
+			// wall "not there, instead" the door)
+			std::int32_t extra = 0;
+			RE::TESForm* packSample = nullptr;
+			for (const auto& it : g_loaded.items) {
+				if (it.pack) {
+					if ((packSample = FindForm(it.plugin, it.local))) {
+						break;
+					}
+				}
+			}
+			for (const auto& p : placed) {
+				if (!packSample || p.base == 0x15804 || Builder::InBuildMenu(p.base)) {
+					continue;
+				}
+				auto* pf = RE::TESForm::LookupByID(p.base);
+				if (!pf || pf->GetFormType() != packSample->GetFormType()) {
+					continue;
+				}
+				const bool saved = std::ranges::any_of(g_loaded.items, [&](const Item& it) {
+					return it.pack && std::abs(it.z - p.z) < 0.5f && std::hypot(it.x - p.x, it.y - p.y) < 0.3f &&
+					       AngleDiffDeg(p.az * toDeg, it.az) < 10.0f;
+				});
+				if (!saved) {
+					++extra;
+					REX::INFO("parts: extra {:08X} '{}' (ref {:08X}) at {:.2f} {:.2f} {:.2f} angle {:.0f}: the backup has no PackIn on that spot and side",
+						p.base, FormName(pf), p.ref, p.x, p.y, p.z, p.az * toDeg);
+				}
+			}
+			REX::INFO("parts: {} of {} saved PackIns are there, {} are not, {} extra ({} walls to switch style)", found, found + missing, missing, extra, g_styleFixes.size());
 			return missing;
 		}
 
