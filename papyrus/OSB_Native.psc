@@ -70,3 +70,10 @@ int[] Function AutoBuildProgress() global native
 Function AutoBuildStop() global native
 ; True while build mode holds an item in placement (e.g. a beacon being positioned).
 bool Function IsPlacing() global native
+
+; After AutoBuild: references to move onto their saved spot (x y z, angles x y z in degrees)
+int Function CorrectionCount() global native
+Form Function CorrectionRef(int aiIndex) global native
+float[] Function CorrectionXform(int aiIndex) global native
+; Logs the backup's hab parts (walls with their door / window style...) that are not where they were; returns how many
+int Function ReportParts() global native

@@ -16,7 +16,27 @@ namespace OSB::Builder
 		std::string name;            // for the log
 		float size{};                // footprint (m^2) from the base bounds; bigger objects are built first
 		std::uint32_t order{ 0 };    // reference form ID at backup time (rises in build order), 0 if unknown
+		float axDeg{}, ayDeg{};      // ObjectReference.GetAngleX/Y()
 	};
+
+	// A reference the build placed (angles in radians, as the engine keeps them).
+	struct Placed
+	{
+		std::uint32_t ref{ 0 }, base{ 0 };
+		float x{}, y{}, z{}, ax{}, ay{}, az{};
+	};
+
+	// Where a misplaced reference should go (angles in degrees, for ObjectReference.SetAngle).
+	struct Correction
+	{
+		std::uint32_t ref{ 0 };
+		float x{}, y{}, z{}, ax{}, ay{}, az{};
+	};
+
+	// After a build: moves for the objects that did not land on their saved spot (all parts of a PackIn move
+	// together, turned about the saved pivot), and every reference placed (positions as after those moves).
+	std::vector<Correction> Corrections();
+	std::vector<Placed> PlacedRefs();
 
 	// Install the engine hooks (call once at plugin load, before the game runs).
 	void Install();

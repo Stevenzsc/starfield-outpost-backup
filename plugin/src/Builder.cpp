@@ -58,6 +58,10 @@ namespace OSB::Builder
 		std::array<float, 4> g_placedAt{};           // x y z, angle z (radians) of the last placed object
 		bool g_placedValid = false;
 		std::vector<std::string> g_offList;          // objects not at their saved spot (checked after each build)
+		std::vector<Placed> g_jobRefs;               // refs placed while building the current object
+		std::vector<Placed> g_allRefs;               // every ref placed by this build (positions after corrections)
+		std::vector<Correction> g_corrections;       // moves that put misplaced objects on their saved spot
+		void AddCorrections(const Job& a_job, const std::array<float, 4>& a_at, const std::vector<Placed>& a_refs);
 
 		class PlacedSink : public RE::BSTEventSink<RE::Workshop::ItemPlacedEvent>
 		{
@@ -68,10 +72,11 @@ namespace OSB::Builder
 				if (auto* ref = a_event.item.get()) {
 					const auto base = ref->GetBaseObject();
 					const auto id = base ? base->GetFormID() : 0;
+					const auto p = ref->GetPosition();
+					const auto r = ref->GetAngle();
+					std::scoped_lock l(g_placedLock);
+					g_jobRefs.push_back({ ref->GetFormID(), id, p.x, p.y, p.z, r.x, r.y, r.z });
 					if (id && (id == g_jobForm.load() || id == 0x15804)) {
-						const auto p = ref->GetPosition();
-						const auto r = ref->GetAngle();
-						std::scoped_lock l(g_placedLock);
 						g_placedAt = { p.x, p.y, p.z, r.z };
 						g_placedValid = true;
 					}
@@ -532,6 +537,7 @@ namespace OSB::Builder
 			{
 				std::scoped_lock l(g_placedLock);
 				g_placedValid = false;
+				g_jobRefs.clear();
 			}
 			g_jobForm = a_job.formID;
 			const auto placedBefore = g_placed.load();
@@ -554,10 +560,12 @@ namespace OSB::Builder
 				// check where it really went
 				std::array<float, 4> at{};
 				bool valid;
+				std::vector<Placed> refs;
 				{
 					std::scoped_lock l(g_placedLock);
 					at = g_placedAt;
 					valid = g_placedValid;
+					refs = g_jobRefs;
 				}
 				if (valid) {
 					const float yaw = a_job.yawDeg * std::numbers::pi_v<float> / 180.0f;
@@ -569,12 +577,47 @@ namespace OSB::Builder
 							a_job.name, at[0], at[1], at[2], a_job.x, a_job.y, a_job.z, dPos, dZ, dAng);
 						REX::WARN("builder: check: {}", line);
 						g_offList.push_back(std::move(line));
+						AddCorrections(a_job, at, refs);
+					} else {
+						std::scoped_lock l(g_placedLock);
+						g_allRefs.insert(g_allRefs.end(), refs.begin(), refs.end());
 					}
 				} else {
 					REX::INFO("builder: check: {} placed, but its reference was not reported", a_job.name);
+					std::scoped_lock l(g_placedLock);
+					g_allRefs.insert(g_allRefs.end(), refs.begin(), refs.end());
 				}
 			}
 			return committed;
+		}
+
+		// An object that landed off its saved spot: move every reference its commit placed (one for a plain
+		// object; the group dummy and all parts for a PackIn) by the same turn about the pivot and shift, so the
+		// pivot ends on the saved spot and angle. Heading is clockwise seen from above (forward = sin, cos).
+		void AddCorrections(const Job& a_job, const std::array<float, 4>& a_at, const std::vector<Placed>& a_refs)
+		{
+			constexpr float toDeg = 180.0f / std::numbers::pi_v<float>;
+			const float yaw = a_job.yawDeg / toDeg;
+			const float d = yaw - a_at[3];
+			const float c = std::cos(d), s = std::sin(d);
+			std::scoped_lock l(g_placedLock);
+			for (const auto& r : a_refs) {
+				Correction m{ r.ref };
+				if (a_refs.size() == 1) {
+					m.x = a_job.x; m.y = a_job.y; m.z = a_job.z;
+					m.ax = a_job.axDeg; m.ay = a_job.ayDeg; m.az = a_job.yawDeg;
+				} else {
+					const float dx = r.x - a_at[0], dy = r.y - a_at[1];
+					m.x = a_job.x + dx * c + dy * s;
+					m.y = a_job.y - dx * s + dy * c;
+					m.z = r.z + (a_job.z - a_at[2]);
+					m.ax = r.ax * toDeg; m.ay = r.ay * toDeg;
+					m.az = std::remainder(r.az + d, 2.0f * std::numbers::pi_v<float>) * toDeg;
+				}
+				g_corrections.push_back(m);
+				g_allRefs.push_back({ r.ref, r.base, m.x, m.y, m.z, m.ax / toDeg, m.ay / toDeg, m.az / toDeg });
+			}
+			REX::INFO("builder: correction for {}: {} references to move", a_job.name, a_refs.size());
 		}
 
 		// Habs snap to the habs already there, and the engine picks the connection nearest the aim, which is
@@ -760,6 +803,11 @@ namespace OSB::Builder
 		g_aborted = false;
 		g_done = 0;
 		g_offList.clear();
+		{
+			std::scoped_lock l(g_placedLock);
+			g_corrections.clear();
+			g_allRefs.clear();
+		}
 		g_built = 0;
 		g_failed = 0;
 		g_total = std::int32_t(a_jobs.size());
@@ -785,5 +833,17 @@ namespace OSB::Builder
 	bool InBuildMenu(std::uint32_t a_formID)
 	{
 		return LookupEntry(a_formID) != nullptr;
+	}
+
+	std::vector<Correction> Corrections()
+	{
+		std::scoped_lock l(g_placedLock);
+		return g_corrections;
+	}
+
+	std::vector<Placed> PlacedRefs()
+	{
+		std::scoped_lock l(g_placedLock);
+		return g_allRefs;
 	}
 }

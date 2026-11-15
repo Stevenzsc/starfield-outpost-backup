@@ -433,6 +433,25 @@ EndFunction
 ; Build the loaded restore list through the workshop engine, like the player would: opens build mode at
 ; the beacon, the plugin selects, positions and commits each object. False if it could not start
 ; (the caller then falls back to placing objects directly).
+
+; Objects the engine snapped somewhere else (another wall, another connection point): move them, with all
+; their parts, onto the saved spot. Returns how many references were moved.
+int Function ApplyCorrections()
+	int n = OSB_Native.CorrectionCount()
+	int moved = 0
+	int i = 0
+	while i < n
+		ObjectReference r = OSB_Native.CorrectionRef(i) as ObjectReference
+		float[] t = OSB_Native.CorrectionXform(i)
+		if r && t && t.Length >= 6
+			r.SetPosition(t[0], t[1], t[2])
+			r.SetAngle(t[3], t[4], t[5])
+			moved += 1
+		endif
+		i += 1
+	endwhile
+	return moved
+EndFunction
 bool Function AutoBuildAt(ObjectReference akBeacon, int aiCount)
 	Notify("building " + aiCount + " objects. Press the exit-build-mode key to cancel and undo.")
 	; what the outpost has now, so a cancelled build can be undone
@@ -465,6 +484,11 @@ bool Function AutoBuildAt(ObjectReference akBeacon, int aiCount)
 		Debug.MessageBox("Restore cancelled.\n\nRemoved the " + removed + " objects it had built; the outpost is as before.")
 		return true
 	endif
+	int moved = ApplyCorrections()
+	if moved > 0
+		Notify("moved " + moved + " misplaced parts back to their saved spot.")
+	endif
+	OSB_Native.ReportParts()
 	lock.Delete()
 	if p && p.Length >= 5
 		if p[2] > 0

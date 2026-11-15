@@ -1063,7 +1063,7 @@ namespace OSB
 					if (!std::isfinite(size) || size < 0 || size > 1e6f) {
 						size = 0;
 					}
-					jobs.push_back({ form->GetFormID(), it.x, it.y, it.z, it.az, std::format("{} {:X}", it.plugin, it.local), size, it.ref });
+					jobs.push_back({ form->GetFormID(), it.x, it.y, it.z, it.az, std::format("{} {:X}", it.plugin, it.local), size, it.ref, it.ax, it.ay });
 				}
 			}
 			return !jobs.empty() && Builder::Start(std::move(jobs));
@@ -1083,6 +1083,82 @@ namespace OSB
 		void AutoBuildStop(std::monostate)
 		{
 			Builder::Stop();
+		}
+
+		// ---- after a build: put misplaced objects on their saved spot, report hab parts ----
+		std::vector<Builder::Correction> g_corr;   // snapshot taken by CorrectionCount
+
+		std::int32_t CorrectionCount(std::monostate)
+		{
+			g_corr = Builder::Corrections();
+			return std::int32_t(g_corr.size());
+		}
+
+		// the reference (Papyrus casts it to ObjectReference); None if it is gone
+		RE::TESForm* CorrectionRef(std::monostate, std::int32_t i)
+		{
+			if (i < 0 || std::size_t(i) >= g_corr.size()) {
+				return nullptr;
+			}
+			return RE::TESForm::LookupByID(g_corr[i].ref);
+		}
+
+		// x y z, angle x y z (degrees)
+		std::vector<float> CorrectionXform(std::monostate, std::int32_t i)
+		{
+			if (i < 0 || std::size_t(i) >= g_corr.size()) {
+				return {};
+			}
+			const auto& c = g_corr[i];
+			return { c.x, c.y, c.z, c.ax, c.ay, c.az };
+		}
+
+		// Compare the backup's PackIns (habs, hab walls with their door / window style, corridors) with what the
+		// build placed, after the corrections. Logs each saved part that is not there, and what is there instead.
+		// Returns how many are not there.
+		std::int32_t ReportParts(std::monostate)
+		{
+			const auto placed = Builder::PlacedRefs();
+			std::scoped_lock l(g_lock);
+			std::int32_t missing = 0, found = 0;
+			for (const auto& it : g_loaded.items) {
+				if (!it.pack) {
+					continue;
+				}
+				auto* form = FindForm(it.plugin, it.local);
+				if (!form) {
+					continue;
+				}
+				const auto want = form->GetFormID();
+				const Builder::Placed* same = nullptr;
+				const Builder::Placed* other = nullptr;
+				float otherDist = 0.5f;
+				for (const auto& p : placed) {
+					const float d = std::hypot(p.x - it.x, p.y - it.y);
+					if (std::abs(p.z - it.z) > 0.5f) {
+						continue;
+					}
+					if (p.base == want && d < 0.3f) {
+						same = &p;
+						break;
+					}
+					if (p.base != want && p.base != 0x15804 && d < otherDist) {
+						other = &p;
+						otherDist = d;
+					}
+				}
+				if (same) {
+					++found;
+					continue;
+				}
+				++missing;
+				auto* otherForm = other ? RE::TESForm::LookupByID(other->base) : nullptr;
+				REX::INFO("parts: saved {} {:X} '{}' at {:.2f} {:.2f} {:.2f} angle {:.0f}: not there{}", it.plugin, it.local, FormName(form), it.x, it.y,
+					it.z, it.az,
+					other ? std::format(", instead {:08X} '{}' angle {:.0f}", other->base, FormName(otherForm), other->az * 180.0f / std::numbers::pi_v<float>) : "");
+			}
+			REX::INFO("parts: {} of {} saved PackIns are there, {} are not", found, found + missing, missing);
+			return missing;
 		}
 	}
 
@@ -1146,6 +1222,10 @@ namespace OSB
 		vm->BindNativeMethod(obj, "AutoBuild", AutoBuild, true, false);
 		vm->BindNativeMethod(obj, "AutoBuildProgress", AutoBuildProgress, true, false);
 		vm->BindNativeMethod(obj, "AutoBuildStop", AutoBuildStop, true, false);
+		vm->BindNativeMethod(obj, "CorrectionCount", CorrectionCount, true, false);
+		vm->BindNativeMethod(obj, "CorrectionRef", CorrectionRef, true, false);
+		vm->BindNativeMethod(obj, "CorrectionXform", CorrectionXform, true, false);
+		vm->BindNativeMethod(obj, "ReportParts", ReportParts, true, false);
 		vm->BindNativeMethod(obj, "IsPlacing", IsPlacing, true, false);
 		REX::INFO("papyrus: OSB_Native registered (version {})", kVersion);
 	}
