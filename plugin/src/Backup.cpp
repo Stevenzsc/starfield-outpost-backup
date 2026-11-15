@@ -1320,12 +1320,8 @@ namespace OSB
 				REX::INFO("styles: workshop gate {} {}, item in hand {:X}, state object {:X} vtable +{:X}",
 					*reinterpret_cast<std::uint8_t*>(ctx + 0x1009), *reinterpret_cast<std::uint8_t*>(ctx + 0x1008),
 					*reinterpret_cast<std::uintptr_t*>(e + 0x268), state, stateVtbl ? stateVtbl - base : 0);
-				if (*reinterpret_cast<std::uintptr_t*>(e + 0x268)) {
-					using cancel_t = void (*)();
-					REL::Relocation<cancel_t>{ REL::ID(121378) }();   // drop it; the next round finds the workshop idle
-					REX::INFO("styles: an item is in hand: cancelled it, trying again next round");
-					return;
-				}
+				// (an item in hand is normal here: build mode sits in StateInspect, which handles "change" by entering
+				// StateCycleSnapBehavior - 21AEC70; cancelling it does not leave that state)
 				for (const auto& f : fixes) {
 					auto* ref = static_cast<RE::TESObjectREFR*>(RE::TESForm::LookupByID(f.ref));
 					if (!ref) {

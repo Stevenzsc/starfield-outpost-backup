@@ -204,6 +204,32 @@ namespace OSB::Diag
 				if (!Readable(engine, 0x700)) {
 					continue;
 				}
+				// what build mode has selected (engine +0x588, a reference handle) and its state object
+				// (engine - 0x4A0 + 0x490): logs every change, so pressing "change" (E) on a wall shows what it does
+				{
+					static std::uint32_t prevHandle = 0;
+					static std::string prevSel;
+					static std::uintptr_t prevState = 0;
+					const auto handle = *reinterpret_cast<std::uint32_t*>(engine + 0x588);
+					std::string sel = "none";
+					const auto mgr = *reinterpret_cast<std::uintptr_t*>(ImageBase() + 0x5E60380);
+					if (handle && mgr && Readable(mgr, 0x70)) {
+						const auto mask = *reinterpret_cast<std::uint32_t*>(mgr + 0x68);
+						const auto table = *reinterpret_cast<std::uintptr_t*>(mgr + 0x50);
+						const auto slot = table + std::uint64_t(handle & mask) * 16;
+						if (table && Readable(slot, 16)) {
+							sel = Describe(*reinterpret_cast<std::uintptr_t*>(slot));
+						}
+					}
+					const auto stateObj = *reinterpret_cast<std::uintptr_t*>(engine - 0x4A0 + 0x490);
+					const auto stateVt = stateObj && Readable(stateObj, 8) ? *reinterpret_cast<std::uintptr_t*>(stateObj) - ImageBase() : 0;
+					if (handle != prevHandle || sel != prevSel || stateVt != prevState) {
+						REX::INFO("diag: selected {:08X} [{}] state vtable +{:X}", handle, sel, stateVt);
+						prevHandle = handle;
+						prevSel = sel;
+						prevState = stateVt;
+					}
+				}
 				const auto item = *reinterpret_cast<std::uintptr_t*>(engine + 0x268);
 				if (!item || !Readable(item, 0xF0)) {
 					prevItemAddr = 0;
