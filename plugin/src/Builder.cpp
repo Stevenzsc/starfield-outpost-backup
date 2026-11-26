@@ -3,14 +3,16 @@
 // Per object: look up its build-menu entry (21A6B60, keyed by base form ID), post NewItemEvent, let the
 // engine create and load the preview, force the preview's position and yaw every frame, then post CommitEvent.
 // While a build runs, the placement pre-check passes and a blocked (red) placement counts as valid.
-// The build is a state machine stepped once per frame on the main thread (Tick, an SFSE permanent task):
-// the build-menu lookup (21A6B60) walks the menu table unlocked, so it must not run on another thread.
+// The build is a state machine stepped by an SFSE permanent task (Tick), one thread at a time, instead of a
+// thread of its own: the build-menu lookup (21A6B60) walks the menu table unlocked, so it must run where the
+// game itself runs frame work.
 
 #include "Builder.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <numbers>
@@ -520,17 +522,19 @@ namespace OSB::Builder
 		void* CurrentItem() { return Field<void*>(kItem); }
 
 		// ---- build state machine ----
-		// Everything below runs on the main thread, one step per frame, from an SFSE permanent task (Tick). The
-		// engine commands are queued like the player's, and every wait counts frames instead of wall-clock time,
-		// so a paused game (menu, alt-tab) does not use up a timeout.
+		// Everything below is stepped by an SFSE permanent task (Tick). In game, that task ran many times per frame
+		// and on several job threads (test 2026-11-27: a 66-"frame" wait took 73 ms), so Tick lets one caller in
+		// at a time and every wait measures time: each call adds the time since the last call, but at most
+		// kMaxStepMs, so a paused game (menu, alt-tab) does not use up a timeout.
 
-		// frame budgets (about 60 fps)
-		constexpr int kPreviewFrames = 180;       // NewItem -> preview item exists
-		constexpr int kAimFrames = 60;            // preview reaches the saved spot
-		constexpr int kSettleFrames = 9;          // 3D load and snapping settle
-		constexpr int kCommitFramesHab = 90;      // commit -> ItemPlacedEvent, per attempt
-		constexpr int kCommitFramesOther = 60;
-		constexpr int kAfterCommitFrames = 6;     // let the placed references report in
+		// time budgets (ms), the same as the old worker thread's waits
+		constexpr float kPreviewMs = 3000.0f;     // NewItem -> preview item exists
+		constexpr float kAimMs = 1000.0f;         // preview reaches the saved spot
+		constexpr float kSettleMs = 150.0f;       // 3D load and snapping settle
+		constexpr float kCommitMsHab = 1500.0f;   // commit -> ItemPlacedEvent, per attempt
+		constexpr float kCommitMsOther = 1000.0f;
+		constexpr float kAfterCommitMs = 100.0f;  // let the placed references report in
+		constexpr float kMaxStepMs = 50.0f;       // most one call may add (a longer gap is a pause)
 
 		enum class Phase
 		{
@@ -550,7 +554,8 @@ namespace OSB::Builder
 			std::size_t next{ 0 };                // index into todo
 			int pass{ 0 };
 			Phase phase{ Phase::kNextJob };
-			int frames{ 0 };                      // frames spent in the current phase
+			float elapsedMs{ 0 };                 // time spent in the current phase (see kMaxStepMs)
+			std::chrono::steady_clock::time_point last{};   // previous Tick call
 			const Job* job{ nullptr };
 			void* before{ nullptr };              // preview item before NewItem
 			std::uint8_t status{ 0 };             // placement status when the commit was decided
@@ -783,6 +788,8 @@ namespace OSB::Builder
 
 		std::atomic<bool> g_ready{ false };      // g_run is filled in and Tick may drive it
 		bool g_tickInstalled = false;
+		std::atomic_flag g_inTick;                // set while one thread runs Step
+		std::atomic<std::uint64_t> g_tickCalls{ 0 }, g_tickSkipped{ 0 };   // per build, for the log
 
 		void Finish()
 		{
@@ -799,6 +806,7 @@ namespace OSB::Builder
 			g_forcing = false;
 			PostCancel();   // drop the last preview the engine re-offers after a commit
 			REX::INFO("builder: done, built {}, failed {}, of {}{}", g_built.load(), g_failed.load(), g_total.load(), g_aborted.load() ? " (aborted)" : "");
+			REX::INFO("builder: frame task ran {} times, {} skipped because another thread was inside", g_tickCalls.load(), g_tickSkipped.load());
 			REX::INFO("builder: check: {} built objects not at their saved spot", g_offList.size());
 			for (const auto& line : g_offList) {
 				REX::INFO("builder: check:   {}", line);
@@ -839,17 +847,20 @@ namespace OSB::Builder
 			}
 		}
 
-		// Main thread, every frame (SFSE permanent task).
-		void Tick()
+		// One step of the build. Only called by Tick, by one thread at a time.
+		void Step()
 		{
-			if (!g_ready.load()) {
-				return;
-			}
 			if (g_aborted.load()) {
 				Finish();
 				return;
 			}
 			auto& r = g_run;
+			const auto now = std::chrono::steady_clock::now();
+			if (r.last != std::chrono::steady_clock::time_point{}) {
+				const float dt = std::chrono::duration<float, std::milli>(now - r.last).count();
+				r.elapsedMs += std::clamp(dt, 0.0f, kMaxStepMs);
+			}
+			r.last = now;
 			switch (r.phase) {
 			case Phase::kNextJob:
 				{
@@ -871,7 +882,7 @@ namespace OSB::Builder
 					r.job = r.todo[r.next++];
 					if (BeginJob(*r.job)) {
 						r.phase = Phase::kWaitPreview;
-						r.frames = 0;
+						r.elapsedMs = 0;
 					} else {
 						r.retry.push_back(r.job);
 					}
@@ -880,8 +891,8 @@ namespace OSB::Builder
 			case Phase::kWaitPreview:
 				if (auto* item = CurrentItem(); item && item != r.before) {
 					r.phase = Phase::kWaitAim;
-					r.frames = 0;
-				} else if (++r.frames > kPreviewFrames) {
+					r.elapsedMs = 0;
+				} else if (r.elapsedMs > kPreviewMs) {
 					REX::WARN("builder: {} ({:08X}) no preview", r.job->name, r.job->formID);
 					r.retry.push_back(r.job);
 					r.phase = Phase::kNextJob;
@@ -891,29 +902,29 @@ namespace OSB::Builder
 				{
 					const auto& p = Field<float[3]>(kPreviewPos);
 					const bool there = std::abs(p[0] - r.job->x) < 0.5f && std::abs(p[1] - r.job->y) < 0.5f;
-					if (there || ++r.frames > kAimFrames) {
+					if (there || r.elapsedMs > kAimMs) {
 						r.phase = Phase::kSettle;
-						r.frames = 0;
+						r.elapsedMs = 0;
 					}
 					return;
 				}
 			case Phase::kSettle:
-				if (++r.frames >= kSettleFrames) {
+				if (r.elapsedMs >= kSettleMs) {
 					if (DecideCommit(*r.job)) {
 						r.phase = Phase::kWaitPlaced;
 					} else {
 						r.retry.push_back(r.job);
 						r.phase = Phase::kNextJob;
 					}
-					r.frames = 0;
+					r.elapsedMs = 0;
 				}
 				return;
 			case Phase::kWaitPlaced:
 				if (g_placed.load() != r.placedBefore) {
 					r.committed = true;
 					r.phase = Phase::kAfterCommit;
-					r.frames = 0;
-				} else if (++r.frames > (r.hab ? kCommitFramesHab : kCommitFramesOther)) {
+					r.elapsedMs = 0;
+				} else if (r.elapsedMs > (r.hab ? kCommitMsHab : kCommitMsOther)) {
 					if (r.attempt < r.attempts) {
 						REX::INFO("builder: {} not placed after commit {}, committing again", r.job->name, r.attempt);
 						++r.attempt;
@@ -921,11 +932,11 @@ namespace OSB::Builder
 					} else {
 						r.phase = Phase::kAfterCommit;
 					}
-					r.frames = 0;
+					r.elapsedMs = 0;
 				}
 				return;
 			case Phase::kAfterCommit:
-				if (++r.frames >= kAfterCommitFrames) {
+				if (r.elapsedMs >= kAfterCommitMs) {
 					RecordResult(*r.job);
 					if (r.committed) {
 						++g_built;
@@ -937,6 +948,23 @@ namespace OSB::Builder
 				}
 				return;
 			}
+		}
+
+		// SFSE permanent task. It can run several times per frame and on different job threads: let one in.
+		void Tick()
+		{
+			if (!g_ready.load()) {
+				return;
+			}
+			++g_tickCalls;
+			if (g_inTick.test_and_set(std::memory_order_acquire)) {
+				++g_tickSkipped;
+				return;
+			}
+			if (g_ready.load()) {   // a thread that was inside may just have finished the build
+				Step();
+			}
+			g_inTick.clear(std::memory_order_release);
 		}
 	}
 
@@ -1001,6 +1029,8 @@ namespace OSB::Builder
 		g_built = 0;
 		g_failed = 0;
 		g_total = std::int32_t(a_jobs.size());
+		g_tickCalls = 0;
+		g_tickSkipped = 0;
 
 		g_run = {};
 		g_run.jobs = std::move(a_jobs);

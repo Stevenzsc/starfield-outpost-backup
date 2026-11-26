@@ -46,8 +46,8 @@ namespace OSB::Builder
 	// interface is up, e.g. at kPostDataLoad).
 	void InstallTick();
 
-	// Start building the jobs; the frame task builds one step per frame on the main thread. The player
-	// must be in build mode at the outpost. Returns false if a build is already running.
+	// Start building the jobs; the frame task steps the build (one thread at a time, waits measured in time).
+	// The player must be in build mode at the outpost. Returns false if a build is already running.
 	bool Start(std::vector<Job> a_jobs);
 
 	// Progress: [done, built, failed, total, running(0/1), aborted(0/1)]
