@@ -61,4 +61,21 @@ namespace OSB::Builder
 
 	// True if the build menu offers this form (directly or as a variant). The menu is filled in build mode.
 	bool InBuildMenu(std::uint32_t a_formID);
+
+	// A hab wall to switch to another door / window style (one "change" press each).
+	struct StyleTarget
+	{
+		std::uint32_t ref{ 0 };      // the wall reference
+		std::uint32_t handle{ 0 };   // its reference handle
+		std::uint32_t want{ 0 };     // base form the backup has there
+		std::string name;            // for the log
+	};
+
+	// Press "change" once on each wall, like the player: the frame task points build mode's inspect target at
+	// the wall, waits until build mode has picked it up, runs CycleBehavior and waits for build mode to be back
+	// in StateInspect. Call on a game thread, in build mode. False if a build or a style run is active.
+	bool StartStyles(std::vector<StyleTarget> a_targets);
+
+	// True while a style run is active.
+	bool StylesRunning();
 }

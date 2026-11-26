@@ -950,10 +950,172 @@ namespace OSB::Builder
 			}
 		}
 
+		// ---- wall styles ----
+		// Build mode's inspect state picks its target every frame from the crosshair: 21E7570 calls 21DC940
+		// (validate, then 21DBC30 sets engine +0x588 and makes the inspected item). Setting +0x588 directly is
+		// undone on the next frame, and the item stays empty (test 2026-11-27: "selected 00000000", item refs 0,
+		// so CycleBehavior changed nothing). While a style run is active this hook hands 21DC940 the wall's
+		// handle instead, so build mode itself inspects that wall.
+		constexpr REL::ID kInspectTargetCaller{ 121659 };   // +0x21E7570
+		constexpr REL::ID kStateInspectVtbl{ 467015 };      // +0x4D4AC60 WorkshopEngine::StateInspect
+		constexpr REL::ID kWorkshopCtx{ 928905 };           // +0x5F5CE40 (engine - 0x4A0); +0x490 current state
+		constexpr REL::ID kCycleExec{ 121444 };             // +0x21BFBB0 CycleBehavior TCmd execute
+		constexpr REL::ID kCycleCmdVtbl{ 466560 };          // +0x4D49A50 TCmd<..., CycleBehaviorEvent>
+		constexpr REL::ID kCycleEventVtbl{ 467307 };        // +0x4D4B848 CycleBehaviorEvent
+		constexpr std::ptrdiff_t kSelected = 0x588;         // u32 reference handle build mode inspects
+
+		using SetTarget_t = void (*)(std::uint8_t* a_out, void* a_engine, std::uint32_t a_handle, void* a_4);
+		SetTarget_t g_setTarget = nullptr;
+		std::atomic<std::uint32_t> g_forceHandle{ 0 };
+
+		void SetTargetHook(std::uint8_t* a_out, void* a_engine, std::uint32_t a_handle, void* a_4)
+		{
+			if (const auto h = g_forceHandle.load()) {
+				a_handle = h;
+			}
+			g_setTarget(a_out, a_engine, a_handle, a_4);
+		}
+
+		constexpr float kStyleSelectMs = 2000.0f;   // build mode inspects the wall, with refs in its item
+		constexpr float kStyleSettleMs = 150.0f;    // after that, before pressing "change"
+		constexpr float kStyleCycleMs = 4000.0f;    // "change" -> back in StateInspect
+		constexpr float kStyleAfterMs = 300.0f;     // at least this long after "change"
+
+		enum class StylePhase
+		{
+			kNext,
+			kSelect,
+			kAfterCycle,
+		};
+
+		struct StyleRun
+		{
+			std::vector<StyleTarget> targets;
+			std::size_t next{ 0 };
+			StylePhase phase{ StylePhase::kNext };
+			float elapsedMs{ 0 };
+			std::chrono::steady_clock::time_point last{};
+			const StyleTarget* t{ nullptr };
+			std::uint32_t before{ 0 };   // wall base before "change"
+			int pressed{ 0 }, skipped{ 0 };
+		};
+		StyleRun g_styles;
+		std::atomic<bool> g_stylesReady{ false };
+		std::atomic<bool> g_stylesRunning{ false };
+
+		void Advance(float& a_elapsedMs, std::chrono::steady_clock::time_point& a_last)
+		{
+			const auto now = std::chrono::steady_clock::now();
+			if (a_last != std::chrono::steady_clock::time_point{}) {
+				const float dt = std::chrono::duration<float, std::milli>(now - a_last).count();
+				a_elapsedMs += std::clamp(dt, 0.0f, kMaxStepMs);
+			}
+			a_last = now;
+		}
+
+		bool InInspect()
+		{
+			const auto state = *reinterpret_cast<std::uintptr_t*>(kWorkshopCtx.address() + 0x490);
+			return state && *reinterpret_cast<std::uintptr_t*>(state) == kStateInspectVtbl.address();
+		}
+
+		std::uintptr_t StateVtblOffset()
+		{
+			const auto state = *reinterpret_cast<std::uintptr_t*>(kWorkshopCtx.address() + 0x490);
+			const auto base = kEngine.address() - 0x5F5D2E0;
+			return state ? *reinterpret_cast<std::uintptr_t*>(state) - base : 0;
+		}
+
+		// preview refs of the item build mode holds: item +0x08 = {u32 size, u32 cap}
+		std::uint32_t ItemRefCount()
+		{
+			const auto item = reinterpret_cast<std::uintptr_t>(CurrentItem());
+			return item ? *reinterpret_cast<std::uint32_t*>(item + 0x08) : 0;
+		}
+
+		std::uint32_t BaseOf(std::uint32_t a_ref)
+		{
+			auto* ref = RE::TESForm::LookupByID(a_ref);
+			auto* obj = ref ? static_cast<RE::TESObjectREFR*>(ref)->GetBaseObject() : nullptr;
+			return obj ? obj->GetFormID() : 0;
+		}
+
+		// Run the CycleBehavior command the way the input handler (21F4F30) builds it.
+		void PressChange()
+		{
+			using exec_t = void (*)(void* a_cmd);
+			struct
+			{
+				std::uintptr_t vtbl, fn, ctx, eventVtbl;
+				std::uint8_t eventByte, pad[7];
+			} cmd{ kCycleCmdVtbl.address(), kCycleExec.address(), kWorkshopCtx.address(), kCycleEventVtbl.address(), 0, {} };
+			REL::Relocation<exec_t>{ kCycleExec }(&cmd);
+		}
+
+		void FinishStyles()
+		{
+			g_forceHandle = 0;
+			REX::INFO("styles: run done, pressed change on {} walls, {} skipped", g_styles.pressed, g_styles.skipped);
+			g_styles = {};
+			g_stylesReady = false;
+			g_stylesRunning = false;
+		}
+
+		void StyleStep()
+		{
+			auto& s = g_styles;
+			Advance(s.elapsedMs, s.last);
+			switch (s.phase) {
+			case StylePhase::kNext:
+				{
+					if (s.next >= s.targets.size()) {
+						FinishStyles();
+						return;
+					}
+					s.t = &s.targets[s.next++];
+					s.before = BaseOf(s.t->ref);
+					if (s.before == s.t->want) {
+						REX::INFO("styles: {} wall {:08X} is {:08X}: done", s.t->name, s.t->ref, s.before);
+						return;
+					}
+					g_forceHandle = s.t->handle;
+					s.phase = StylePhase::kSelect;
+					s.elapsedMs = 0;
+					return;
+				}
+			case StylePhase::kSelect:
+				{
+					const auto selected = Field<std::uint32_t>(kSelected);
+					const auto refs = ItemRefCount();
+					if (InInspect() && selected == s.t->handle && refs > 0 && s.elapsedMs >= kStyleSettleMs) {
+						REX::INFO("styles: {} wall {:08X} ({:08X}) inspected, item refs {}: change", s.t->name, s.t->ref, s.before, refs);
+						PressChange();
+						++s.pressed;
+						s.phase = StylePhase::kAfterCycle;
+						s.elapsedMs = 0;
+					} else if (s.elapsedMs > kStyleSelectMs) {
+						REX::WARN("styles: {} wall {:08X}: not inspected (selected {:08X}, want handle {:08X}, item refs {}, state +{:X})", s.t->name,
+							s.t->ref, selected, s.t->handle, refs, StateVtblOffset());
+						++s.skipped;
+						s.phase = StylePhase::kNext;
+					}
+					return;
+				}
+			case StylePhase::kAfterCycle:
+				if ((s.elapsedMs >= kStyleAfterMs && InInspect()) || s.elapsedMs > kStyleCycleMs) {
+					const auto after = BaseOf(s.t->ref);
+					REX::INFO("styles: {} wall {:08X}: {:08X} -> change -> {:08X}, want {:08X}{}{}", s.t->name, s.t->ref, s.before, after, s.t->want,
+						after == 0 ? " (reference replaced)" : "", InInspect() ? "" : std::format(" (still in state +{:X})", StateVtblOffset()));
+					s.phase = StylePhase::kNext;
+				}
+				return;
+			}
+		}
+
 		// SFSE permanent task. It can run several times per frame and on different job threads: let one in.
 		void Tick()
 		{
-			if (!g_ready.load()) {
+			if (!g_ready.load() && !g_stylesReady.load()) {
 				return;
 			}
 			++g_tickCalls;
@@ -963,6 +1125,8 @@ namespace OSB::Builder
 			}
 			if (g_ready.load()) {   // a thread that was inside may just have finished the build
 				Step();
+			} else if (g_stylesReady.load()) {
+				StyleStep();
 			}
 			g_inTick.clear(std::memory_order_release);
 		}
@@ -988,6 +1152,11 @@ namespace OSB::Builder
 		// a hab next to or on another hab snaps first; this state commits only with +0x188 (snap found),
 		// status 2 and +0x630 == 4
 		HookSlot<2>(REL::ID(466661), 0xB8 / 8, "StateUpdateSnapped commit (21B4B70)");
+		// build mode's inspect target (both calls in 21E7570 go to 21DC940)
+		g_setTarget = HookCall<SetTarget_t>(kInspectTargetCaller, 0x78B, &SetTargetHook, "inspect target (21DC940)");
+		if (auto second = HookCall<SetTarget_t>(kInspectTargetCaller, 0x7FE, &SetTargetHook, "inspect target 2 (21DC940)"); second != g_setTarget) {
+			REX::WARN("builder: inspect target calls differ: {:X} {:X}", reinterpret_cast<std::uintptr_t>(g_setTarget), reinterpret_cast<std::uintptr_t>(second));
+		}
 		[]<std::size_t... I>(std::index_sequence<I...>) { (HookCmd<I>(), ...); }(std::make_index_sequence<kGuardCount>{});
 		REX::INFO("builder: player command lock installed ({} commands)", kGuardCount);
 	}
@@ -995,6 +1164,11 @@ namespace OSB::Builder
 	bool Start(std::vector<Job> a_jobs)
 	{
 		if (g_running.exchange(true)) {
+			return false;
+		}
+		if (g_stylesRunning.load()) {
+			REX::WARN("builder: a style run is active");
+			g_running = false;
 			return false;
 		}
 		if (!g_aim || !g_precheck || !g_update || !g_tickInstalled) {
@@ -1066,6 +1240,26 @@ namespace OSB::Builder
 	bool IsPlacing()
 	{
 		return Field<void*>(kItem) != nullptr;
+	}
+
+	bool StartStyles(std::vector<StyleTarget> a_targets)
+	{
+		if (a_targets.empty() || g_running.load() || !g_tickInstalled || !g_setTarget) {
+			return false;
+		}
+		if (g_stylesRunning.exchange(true)) {
+			return false;
+		}
+		REX::INFO("styles: run start, {} walls", a_targets.size());
+		g_styles = {};
+		g_styles.targets = std::move(a_targets);
+		g_stylesReady = true;
+		return true;
+	}
+
+	bool StylesRunning()
+	{
+		return g_stylesRunning.load();
 	}
 
 	bool InBuildMenu(std::uint32_t a_formID)

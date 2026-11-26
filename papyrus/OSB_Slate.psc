@@ -20,6 +20,7 @@ float Property kMaxGuideMeters = 2000.0 AutoReadOnly Hidden      ; farther than 
 float Property kBeaconNearMeters = 50.0 AutoReadOnly Hidden      ; a beacon this close to the saved spot counts
 float Property kBeaconToleranceMeters = 25.0 AutoReadOnly Hidden ; farther than this: ask before restoring
 int Property kPageSize = 8 AutoReadOnly Hidden
+int Property kStyleRounds = 120 AutoReadOnly Hidden   ; wall style rounds after a build, about 1 s each
 float Property kProgressSeconds = 3.0 AutoReadOnly Hidden
 float Property kPollSeconds = 3.0 AutoReadOnly Hidden
 float Property kArriveTimeout = 7200.0 AutoReadOnly Hidden       ; real seconds to wait for the landing
@@ -480,16 +481,17 @@ bool Function AutoBuildAt(ObjectReference akBeacon, int aiCount)
 	if !(p && p.Length >= 6 && p[5] == 1)
 		; still in build mode: switch walls to their saved door / window style, like "change style" by hand
 		Notify("setting door and window styles...")
-		; one style step per round; the wall changes on a later frame, so look again before the next step
+		; each round the plugin presses "change" once on every wall that is still wrong, one wall at a time
+		; (seconds per round); look again in between, for up to kStyleRounds seconds
 		int round = 0
-		while round < 8
+		while round < kStyleRounds
 			OSB_Native.ReportRefs(akBeacon.GetRefsLinkedToMe(OSB.GetWorkshopItemKeyword()))
 			OSB_Native.ReportParts()
 			if OSB_Native.FixStyles() > 0
 				Utility.Wait(1.0)
 				round += 1
 			else
-				round = 8
+				round = kStyleRounds
 			endif
 		endwhile
 	endif

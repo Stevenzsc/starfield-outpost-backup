@@ -1260,9 +1260,11 @@ namespace OSB
 			return missing;
 		}
 
-		// One "change style" step for each wall in g_styleFixes, the way the player does it in build mode's select
-		// mode (point at the wall, press E). The script calls this once per round and looks again in between.
-		// Runs on the main thread (SFSE task). Returns how many walls it queued.
+		// One "change style" press for each wall in g_styleFixes, the way the player does it in build mode's
+		// inspect mode (point at the wall, press "change"). Builder runs the presses one wall at a time on the
+		// frame task (see Builder::StartStyles); the script calls this once per round and looks again in between.
+		// Returns how many walls still have the wrong style (0: nothing to do). While a run is still going it
+		// only reports that count and starts nothing.
 		std::int32_t FixStyles(std::monostate)
 		{
 			std::vector<StyleFix> fixes;
@@ -1273,24 +1275,15 @@ namespace OSB
 			if (fixes.empty()) {
 				return 0;
 			}
+			if (Builder::StylesRunning()) {
+				return std::int32_t(fixes.size());
+			}
 			const auto* tasks = SFSE::GetTaskInterface();
 			if (!tasks) {
 				REX::WARN("styles: no SFSE task interface");
 				return 0;
 			}
 			tasks->AddTask([fixes]() {
-				// Like pressing "change" (E) on a wall in build mode's select mode: select the wall (engine +0x588,
-				// via the crosshair's setter 21DBC30), then run the CycleBehavior command (its TCmd's execute,
-				// 21BFBB0, with the same fields the input handler 21F4F30 fills in) - the engine then enters
-				// StateCycleSnapBehavior for the selected wall and switches it to its next style.
-				using select_t = std::uint8_t (*)(void* a_engine, std::uint32_t a_handle);
-				using exec_t = void (*)(void* a_cmd);
-				const REL::Relocation<select_t> select{ REL::ID(121611) };   // +0x21DBC30
-				const REL::Relocation<exec_t> exec{ REL::ID(121444) };       // +0x21BFBB0
-				auto* engine = reinterpret_cast<void*>(REL::ID(928921).address());      // +0x5F5D2E0
-				const auto ctx = REL::ID(928905).address();                             // +0x5F5CE40 (engine - 0x4A0)
-				const auto cmdVtbl = REL::ID(466560).address();                         // +0x4D49A50
-				const auto eventVtbl = REL::ID(467307).address();                       // +0x4D4B848
 				// reference -> handle: the handle table (manager at +0x5E60380: entries {object, tag} at +0x50,
 				// index mask at +0x68); handle = index | (tag & ~mask)
 				const auto mgr = *reinterpret_cast<std::uintptr_t*>(REL::ID(883285).address());
@@ -1312,16 +1305,7 @@ namespace OSB
 						}
 					}
 				}
-				// the command only runs when the workshop is idle: nothing in hand (+0x268), gate byte ctx+0x1009 set
-				const auto e = reinterpret_cast<std::uintptr_t>(engine);
-				const auto state = *reinterpret_cast<std::uintptr_t*>(ctx + 0x490);
-				const auto stateVtbl = state ? *reinterpret_cast<std::uintptr_t*>(state) : 0;
-				const auto base = REL::ID(928921).address() - 0x5F5D2E0;   // image base, from the engine's known offset
-				REX::INFO("styles: workshop gate {} {}, item in hand {:X}, state object {:X} vtable +{:X}",
-					*reinterpret_cast<std::uint8_t*>(ctx + 0x1009), *reinterpret_cast<std::uint8_t*>(ctx + 0x1008),
-					*reinterpret_cast<std::uintptr_t*>(e + 0x268), state, stateVtbl ? stateVtbl - base : 0);
-				// (an item in hand is normal here: build mode sits in StateInspect, which handles "change" by entering
-				// StateCycleSnapBehavior - 21AEC70; cancelling it does not leave that state)
+				std::vector<Builder::StyleTarget> targets;
 				for (const auto& f : fixes) {
 					auto* ref = static_cast<RE::TESObjectREFR*>(RE::TESForm::LookupByID(f.ref));
 					if (!ref) {
@@ -1339,16 +1323,10 @@ namespace OSB
 						REX::INFO("styles: {} wall {:08X} ({:08X}): no handle", f.name, f.ref, id);
 						continue;
 					}
-					select(engine, h->second);
-					struct
-					{
-						std::uintptr_t vtbl, fn, ctx, eventVtbl;
-						std::uint8_t eventByte, pad[7];
-					} cmd{ cmdVtbl, REL::ID(121444).address(), ctx, eventVtbl, 0, {} };
-					exec(&cmd);
-					const auto after = ref->GetBaseObject();
-					REX::INFO("styles: {} wall {:08X} handle {:08X}: {:08X} -> change -> {:08X}, want {:08X}", f.name, f.ref, h->second, id,
-						after ? after->GetFormID() : 0, f.want);
+					targets.push_back({ f.ref, h->second, f.want, f.name });
+				}
+				if (!targets.empty() && !Builder::StartStyles(std::move(targets))) {
+					REX::WARN("styles: could not start a style run (build or style run active, or hooks missing)");
 				}
 			});
 			return std::int32_t(fixes.size());
