@@ -139,6 +139,7 @@ namespace
 			DumpLoadOrder();
 			OSB::RegisterNatives();
 			OSB::Diag::Install(OSB::DataFolder() / "diag.txt");
+			OSB::Builder::InstallTick();
 		}
 	}
 

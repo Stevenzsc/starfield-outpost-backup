@@ -42,8 +42,12 @@ namespace OSB::Builder
 	// Install the engine hooks (call once at plugin load, before the game runs).
 	void Install();
 
-	// Start building the jobs on a worker thread. The player must be in build mode at the outpost.
-	// Returns false if a build is already running.
+	// Register the per-frame task that drives a build on the main thread (call once SFSE's task
+	// interface is up, e.g. at kPostDataLoad).
+	void InstallTick();
+
+	// Start building the jobs; the frame task builds one step per frame on the main thread. The player
+	// must be in build mode at the outpost. Returns false if a build is already running.
 	bool Start(std::vector<Job> a_jobs);
 
 	// Progress: [done, built, failed, total, running(0/1), aborted(0/1)]

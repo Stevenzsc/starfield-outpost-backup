@@ -1412,13 +1412,15 @@ namespace OSB
 		vm->BindNativeMethod(obj, "GetRestoreForm", GetRestoreForm, true, false);
 		vm->BindNativeMethod(obj, "GetRestoreXform", GetRestoreXform, true, false);
 		vm->BindNativeMethod(obj, "GetRestoreName", GetRestoreName, true, false);
-		vm->BindNativeMethod(obj, "AutoBuild", AutoBuild, true, false);
+		// AutoBuild and ReportParts read the build menu (Builder::InBuildMenu -> 21A6B60, which walks the menu
+		// table unlocked and writes its selection): not tasklet-callable, so the VM runs them on the main thread
+		vm->BindNativeMethod(obj, "AutoBuild", AutoBuild, false, false);
 		vm->BindNativeMethod(obj, "AutoBuildProgress", AutoBuildProgress, true, false);
 		vm->BindNativeMethod(obj, "AutoBuildStop", AutoBuildStop, true, false);
 		vm->BindNativeMethod(obj, "CorrectionCount", CorrectionCount, true, false);
 		vm->BindNativeMethod(obj, "CorrectionRef", CorrectionRef, true, false);
 		vm->BindNativeMethod(obj, "CorrectionXform", CorrectionXform, true, false);
-		vm->BindNativeMethod(obj, "ReportParts", ReportParts, true, false);
+		vm->BindNativeMethod(obj, "ReportParts", ReportParts, false, false);
 		vm->BindNativeMethod(obj, "ReportBegin", ReportBegin, true, false);
 		vm->BindNativeMethod(obj, "ReportAddRef", ReportAddRef, true, false);
 		vm->BindNativeMethod(obj, "ReportRefs", ReportRefs, true, false);

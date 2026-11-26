@@ -2,18 +2,18 @@
 //
 // Per object: look up its build-menu entry (21A6B60, keyed by base form ID), post NewItemEvent, let the
 // engine create and load the preview, force the preview's position and yaw every frame, then post CommitEvent.
-// While a build runs, the cost/limit pre-check passes and a blocked (red) placement counts as valid.
+// While a build runs, the placement pre-check passes and a blocked (red) placement counts as valid.
+// The build is a state machine stepped once per frame on the main thread (Tick, an SFSE permanent task):
+// the build-menu lookup (21A6B60) walks the menu table unlocked, so it must not run on another thread.
 
 #include "Builder.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <numbers>
-#include <thread>
 
 extern "C" __declspec(dllimport) int __stdcall VirtualProtect(void*, std::size_t, unsigned long, unsigned long*);
 
@@ -31,7 +31,7 @@ namespace OSB::Builder
 		constexpr REL::ID kPostCancel{ 121378 };        // +0x21BB4A0 ()
 		constexpr REL::ID kUpdatePlacement{ 121599 };   // +0x21D74B0 per-frame placement update
 		constexpr std::ptrdiff_t kAimCallOff = 0x43B;       // call 21CE760 (compute preview transform)
-		constexpr std::ptrdiff_t kPrecheckCallOff = 0x32D;  // call 21D3DD0 (cost/limit status, 0 = ok)
+		constexpr std::ptrdiff_t kPrecheckCallOff = 0x32D;  // call 21D3DD0 (placement check: raycast + per-mode validator, 0 = ok)
 		constexpr REL::ID kStateUpdatePlacement{ 121280 };  // +0x21B41F0 (StateUpdatePlacement vfunc 0x130)
 		constexpr std::ptrdiff_t kUpdateCallOff = 0x57;     // call 21D74B0
 		constexpr REL::ID kStateUpdateFoundation{ 121270 };  // +0x21B2470 (StateUpdateAutoFoundation vfunc 0x130)
@@ -519,26 +519,54 @@ namespace OSB::Builder
 
 		void* CurrentItem() { return Field<void*>(kItem); }
 
-		bool WaitFor(auto a_cond, int a_ms)
-		{
-			for (int t = 0; t < a_ms; t += 20) {
-				if (a_cond()) {
-					return true;
-				}
-				if (g_aborted.load()) {
-					return false;
-				}
-				std::this_thread::sleep_for(std::chrono::milliseconds(20));
-			}
-			return a_cond();
-		}
+		// ---- build state machine ----
+		// Everything below runs on the main thread, one step per frame, from an SFSE permanent task (Tick). The
+		// engine commands are queued like the player's, and every wait counts frames instead of wall-clock time,
+		// so a paused game (menu, alt-tab) does not use up a timeout.
 
-		// One object: preview at the target, commit. True if the engine committed it.
-		bool BuildOne(const Job& a_job)
+		// frame budgets (about 60 fps)
+		constexpr int kPreviewFrames = 180;       // NewItem -> preview item exists
+		constexpr int kAimFrames = 60;            // preview reaches the saved spot
+		constexpr int kSettleFrames = 9;          // 3D load and snapping settle
+		constexpr int kCommitFramesHab = 90;      // commit -> ItemPlacedEvent, per attempt
+		constexpr int kCommitFramesOther = 60;
+		constexpr int kAfterCommitFrames = 6;     // let the placed references report in
+
+		enum class Phase
+		{
+			kNextJob,
+			kWaitPreview,
+			kWaitAim,
+			kSettle,
+			kWaitPlaced,
+			kAfterCommit,
+		};
+
+		struct Run
+		{
+			std::vector<Job> jobs;                // sorted; owns the jobs the pointers below refer to
+			std::vector<const Job*> todo;         // this pass
+			std::vector<const Job*> retry;        // for the next pass
+			std::size_t next{ 0 };                // index into todo
+			int pass{ 0 };
+			Phase phase{ Phase::kNextJob };
+			int frames{ 0 };                      // frames spent in the current phase
+			const Job* job{ nullptr };
+			void* before{ nullptr };              // preview item before NewItem
+			std::uint8_t status{ 0 };             // placement status when the commit was decided
+			std::uint32_t placedBefore{ 0 };
+			int attempt{ 0 }, attempts{ 1 };
+			bool hab{ false };
+			bool committed{ false };
+		};
+		Run g_run;                                // touched only by Start (before g_ready) and Tick
+
+		// Post NewItem for the current job. False if it cannot be built now (goes to the next pass).
+		bool BeginJob(const Job& a_job)
 		{
 			// look up right before building: the lookup also sets the menu's selected variant
-			void* a_entry = LookupEntry(a_job.formID);
-			if (!a_entry) {
+			void* entry = LookupEntry(a_job.formID);
+			if (!entry) {
 				REX::WARN("builder: {} ({:08X}) is not in the build menu", a_job.name, a_job.formID);
 				return false;
 			}
@@ -553,27 +581,21 @@ namespace OSB::Builder
 				g_snapTry = 0;
 				g_snapOrigin = -1;
 			}
-			void* before = CurrentItem();
+			g_run.before = CurrentItem();
 			g_lockZ = g_forceAll.load() && a_job.size < kSmallObject;
 			g_logAim = true;
 			g_logFoundation = true;
 			g_logSnap = true;
 			g_logSnapSearch = true;
-			PostNewItem(a_entry, a_job.formID);
-			const bool got = WaitFor([&] { return CurrentItem() && CurrentItem() != before; }, 3000);
-			if (got) {
-				WaitFor([&] {
-					const auto& p = Field<float[3]>(kPreviewPos);
-					return std::abs(p[0] - a_job.x) < 0.5f && std::abs(p[1] - a_job.y) < 0.5f;
-				}, 1000);
-				std::this_thread::sleep_for(std::chrono::milliseconds(150));   // 3D load and snapping settle
-			}
+			PostNewItem(entry, a_job.formID);
+			return true;
+		}
+
+		// Preview settled: commit it, or leave it for a later pass. True if a commit was posted.
+		bool DecideCommit(const Job& a_job)
+		{
 			const auto& p = Field<float[3]>(kPreviewPos);
-			const auto status = Field<std::uint8_t>(kStatus);
-			if (!got) {
-				REX::WARN("builder: {} ({:08X}) no preview", a_job.name, a_job.formID);
-				return false;
-			}
+			g_run.status = Field<std::uint8_t>(kStatus);
 			// small objects whose preview is not at the saved height have no floor yet (their hab is not
 			// built): leave them for a later pass, except on the last one
 			if (!g_forceAll.load() && a_job.size < kSmallObject && std::abs(p[2] - a_job.z) > 0.3f) {
@@ -581,6 +603,7 @@ namespace OSB::Builder
 				return false;
 			}
 			// early passes: a status the commit hook will not force would only be refused; try it next pass
+			const auto status = g_run.status;
 			if (!g_forceAll.load() && status != kStatusOk && status != 4 && status != 0x18) {
 				REX::INFO("builder: {} ({:08X}) status {}: later", a_job.name, a_job.formID, status);
 				return false;
@@ -591,55 +614,57 @@ namespace OSB::Builder
 				g_jobRefs.clear();
 			}
 			g_jobForm = a_job.formID;
-			const auto placedBefore = g_placed.load();
+			g_run.placedBefore = g_placed.load();
 			// a hab goes to the auto-foundation state on the first commit and needs another commit there
 			// (like confirming the foundation by hand): habs get up to 3 commits, other objects one
-			const bool hab = a_job.size >= kSmallObject;
-			const int attempts = hab ? 3 : 1;
-			bool committed = false;
-			for (int attempt = 1; attempt <= attempts && !committed && !g_aborted.load(); ++attempt) {
-				PostCommit();
-				committed = WaitFor([&] { return g_placed.load() != placedBefore; }, hab ? 1500 : 1000);
-				if (!committed && attempt < attempts) {
-					REX::INFO("builder: {} not placed after commit {}, committing again", a_job.name, attempt);
-				}
-			}
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			g_run.hab = a_job.size >= kSmallObject;
+			g_run.attempts = g_run.hab ? 3 : 1;
+			g_run.attempt = 1;
+			g_run.committed = false;
+			PostCommit();
+			return true;
+		}
+
+		// After the commit window: log, check where it went, queue corrections.
+		void RecordResult(const Job& a_job)
+		{
+			const auto& p = Field<float[3]>(kPreviewPos);
+			const bool committed = g_run.committed;
 			REX::INFO("builder: {} ({:08X}, size {:.0f}) at {:.2f} {:.2f} {:.2f} (target {:.2f} {:.2f} {:.2f}) status {} -> {}", a_job.name, a_job.formID, a_job.size,
-				p[0], p[1], p[2], a_job.x, a_job.y, a_job.z, status, committed ? "built" : "not built");
-			if (committed) {
-				// check where it really went
-				std::array<float, 4> at{};
-				bool valid;
-				std::vector<Placed> refs;
-				{
-					std::scoped_lock l(g_placedLock);
-					at = g_placedAt;
-					valid = g_placedValid;
-					refs = g_jobRefs;
-				}
-				if (valid) {
-					const float yaw = a_job.yawDeg * std::numbers::pi_v<float> / 180.0f;
-					float dAng = std::remainder(at[3] - yaw, 2.0f * std::numbers::pi_v<float>) * 180.0f / std::numbers::pi_v<float>;
-					const float dPos = std::hypot(at[0] - a_job.x, at[1] - a_job.y);
-					const float dZ = at[2] - a_job.z;
-					if (dPos > 0.3f || std::abs(dZ) > 0.3f || std::abs(dAng) > 5.0f) {
-						auto line = std::format("{} at {:.2f} {:.2f} {:.2f} (saved {:.2f} {:.2f} {:.2f}): off {:.2f} m, height {:+.2f} m, angle {:+.0f} deg",
-							a_job.name, at[0], at[1], at[2], a_job.x, a_job.y, a_job.z, dPos, dZ, dAng);
-						REX::WARN("builder: check: {}", line);
-						g_offList.push_back(std::move(line));
-						AddCorrections(a_job, at, refs);
-					} else {
-						std::scoped_lock l(g_placedLock);
-						g_allRefs.insert(g_allRefs.end(), refs.begin(), refs.end());
-					}
+				p[0], p[1], p[2], a_job.x, a_job.y, a_job.z, g_run.status, committed ? "built" : "not built");
+			if (!committed) {
+				return;
+			}
+			// check where it really went
+			std::array<float, 4> at{};
+			bool valid;
+			std::vector<Placed> refs;
+			{
+				std::scoped_lock l(g_placedLock);
+				at = g_placedAt;
+				valid = g_placedValid;
+				refs = g_jobRefs;
+			}
+			if (valid) {
+				const float yaw = a_job.yawDeg * std::numbers::pi_v<float> / 180.0f;
+				float dAng = std::remainder(at[3] - yaw, 2.0f * std::numbers::pi_v<float>) * 180.0f / std::numbers::pi_v<float>;
+				const float dPos = std::hypot(at[0] - a_job.x, at[1] - a_job.y);
+				const float dZ = at[2] - a_job.z;
+				if (dPos > 0.3f || std::abs(dZ) > 0.3f || std::abs(dAng) > 5.0f) {
+					auto line = std::format("{} at {:.2f} {:.2f} {:.2f} (saved {:.2f} {:.2f} {:.2f}): off {:.2f} m, height {:+.2f} m, angle {:+.0f} deg",
+						a_job.name, at[0], at[1], at[2], a_job.x, a_job.y, a_job.z, dPos, dZ, dAng);
+					REX::WARN("builder: check: {}", line);
+					g_offList.push_back(std::move(line));
+					AddCorrections(a_job, at, refs);
 				} else {
-					REX::INFO("builder: check: {} placed, but its reference was not reported", a_job.name);
 					std::scoped_lock l(g_placedLock);
 					g_allRefs.insert(g_allRefs.end(), refs.begin(), refs.end());
 				}
+			} else {
+				REX::INFO("builder: check: {} placed, but its reference was not reported", a_job.name);
+				std::scoped_lock l(g_placedLock);
+				g_allRefs.insert(g_allRefs.end(), refs.begin(), refs.end());
 			}
-			return committed;
 		}
 
 		// An object that landed off its saved spot: move every reference its commit placed (one for a plain
@@ -756,42 +781,15 @@ namespace OSB::Builder
 		// others; the last pass forces every placement status to OK.
 		constexpr int kPasses = 3;
 
-		void Worker(std::vector<Job> a_jobs)
+		std::atomic<bool> g_ready{ false };      // g_run is filled in and Tick may drive it
+		bool g_tickInstalled = false;
+
+		void Finish()
 		{
-			REX::INFO("builder: start, {} objects", a_jobs.size());
-			// big things first (habs, structures), so furniture has a floor to land on
-			// then small things from the lowest saved height up: a desk before the computer on it
-			std::stable_sort(a_jobs.begin(), a_jobs.end(), [](const Job& a, const Job& b) {
-				const bool bigA = a.size >= kSmallObject, bigB = b.size >= kSmallObject;
-				if (bigA != bigB) return bigA;
-				if (bigA) return a.size > b.size;
-				if (a.z != b.z) return a.z < b.z;
-				return a.size > b.size;
-			});
-			OrderHabs(a_jobs);
-			std::vector<const Job*> todo;
-			for (const auto& job : a_jobs) {
-				todo.push_back(&job);
-			}
-			g_forcing = true;
-			for (int pass = 1; pass <= kPasses && !todo.empty() && !g_stop.load(); ++pass) {
-				g_forceAll = pass == kPasses;
-				REX::INFO("builder: pass {} ({} objects{})", pass, todo.size(), g_forceAll.load() ? ", forcing all checks" : "");
-				std::vector<const Job*> retry;
-				for (const auto* job : todo) {
-					if (g_stop.load()) {
-						break;
-					}
-					if (BuildOne(*job)) {
-						++g_built;
-						++g_done;
-					} else {
-						retry.push_back(job);
-					}
-				}
-				todo = std::move(retry);
-			}
-			for (const auto* job : todo) {
+			// whatever was not built: what this pass still had queued, and what it put off
+			std::vector<const Job*> left(g_run.todo.begin() + std::min(g_run.next, g_run.todo.size()), g_run.todo.end());
+			left.insert(left.end(), g_run.retry.begin(), g_run.retry.end());
+			for (const auto* job : left) {
 				REX::WARN("builder: {} ({:08X}) could not be built", job->name, job->formID);
 				++g_failed;
 				++g_done;
@@ -800,12 +798,145 @@ namespace OSB::Builder
 			g_lockZ = false;
 			g_forcing = false;
 			PostCancel();   // drop the last preview the engine re-offers after a commit
-			REX::INFO("builder: done, built {}, failed {}, of {}", g_built.load(), g_failed.load(), g_total.load());
+			REX::INFO("builder: done, built {}, failed {}, of {}{}", g_built.load(), g_failed.load(), g_total.load(), g_aborted.load() ? " (aborted)" : "");
 			REX::INFO("builder: check: {} built objects not at their saved spot", g_offList.size());
 			for (const auto& line : g_offList) {
 				REX::INFO("builder: check:   {}", line);
 			}
+			g_run = {};
+			g_ready = false;
 			g_running = false;
+		}
+
+		// Next pass, or false when the build is over.
+		bool NextPass()
+		{
+			if (g_run.pass > 0) {
+				g_run.todo = std::move(g_run.retry);
+				g_run.retry.clear();
+				g_run.next = 0;
+			}
+			if (g_run.todo.empty() || g_run.pass >= kPasses || g_stop.load()) {
+				return false;
+			}
+			++g_run.pass;
+			g_forceAll = g_run.pass == kPasses;
+			REX::INFO("builder: pass {} ({} objects{})", g_run.pass, g_run.todo.size(), g_forceAll.load() ? ", forcing all checks" : "");
+			return true;
+		}
+
+		void RegisterSink()
+		{
+			static bool registered = false;
+			if (registered) {
+				return;
+			}
+			using src_t = RE::BSTEventSource<RE::Workshop::ItemPlacedEvent>* (*)();
+			if (auto* src = REL::Relocation<src_t>{ REL::ID(73963) }()) {   // +0xF4F840
+				static PlacedSink sink;
+				src->RegisterSink(&sink);
+				registered = true;
+			}
+		}
+
+		// Main thread, every frame (SFSE permanent task).
+		void Tick()
+		{
+			if (!g_ready.load()) {
+				return;
+			}
+			if (g_aborted.load()) {
+				Finish();
+				return;
+			}
+			auto& r = g_run;
+			switch (r.phase) {
+			case Phase::kNextJob:
+				{
+					const bool first = r.pass == 0;
+					if (first) {   // first frame of a build
+						RegisterSink();
+						g_forcing = true;
+					}
+					if (first || r.next >= r.todo.size()) {
+						if (!NextPass()) {
+							Finish();
+							return;
+						}
+					}
+					if (g_stop.load()) {
+						Finish();
+						return;
+					}
+					r.job = r.todo[r.next++];
+					if (BeginJob(*r.job)) {
+						r.phase = Phase::kWaitPreview;
+						r.frames = 0;
+					} else {
+						r.retry.push_back(r.job);
+					}
+					return;
+				}
+			case Phase::kWaitPreview:
+				if (auto* item = CurrentItem(); item && item != r.before) {
+					r.phase = Phase::kWaitAim;
+					r.frames = 0;
+				} else if (++r.frames > kPreviewFrames) {
+					REX::WARN("builder: {} ({:08X}) no preview", r.job->name, r.job->formID);
+					r.retry.push_back(r.job);
+					r.phase = Phase::kNextJob;
+				}
+				return;
+			case Phase::kWaitAim:
+				{
+					const auto& p = Field<float[3]>(kPreviewPos);
+					const bool there = std::abs(p[0] - r.job->x) < 0.5f && std::abs(p[1] - r.job->y) < 0.5f;
+					if (there || ++r.frames > kAimFrames) {
+						r.phase = Phase::kSettle;
+						r.frames = 0;
+					}
+					return;
+				}
+			case Phase::kSettle:
+				if (++r.frames >= kSettleFrames) {
+					if (DecideCommit(*r.job)) {
+						r.phase = Phase::kWaitPlaced;
+					} else {
+						r.retry.push_back(r.job);
+						r.phase = Phase::kNextJob;
+					}
+					r.frames = 0;
+				}
+				return;
+			case Phase::kWaitPlaced:
+				if (g_placed.load() != r.placedBefore) {
+					r.committed = true;
+					r.phase = Phase::kAfterCommit;
+					r.frames = 0;
+				} else if (++r.frames > (r.hab ? kCommitFramesHab : kCommitFramesOther)) {
+					if (r.attempt < r.attempts) {
+						REX::INFO("builder: {} not placed after commit {}, committing again", r.job->name, r.attempt);
+						++r.attempt;
+						PostCommit();
+					} else {
+						r.phase = Phase::kAfterCommit;
+					}
+					r.frames = 0;
+				}
+				return;
+			case Phase::kAfterCommit:
+				if (++r.frames >= kAfterCommitFrames) {
+					RecordResult(*r.job);
+					if (r.committed) {
+						++g_built;
+						++g_done;
+					} else {
+						r.retry.push_back(r.job);
+					}
+					r.phase = Phase::kNextJob;
+				}
+				return;
+			}
 		}
 	}
 
@@ -838,20 +969,23 @@ namespace OSB::Builder
 		if (g_running.exchange(true)) {
 			return false;
 		}
-		if (!g_aim || !g_precheck || !g_update) {
-			REX::ERROR("builder: hooks missing");
+		if (!g_aim || !g_precheck || !g_update || !g_tickInstalled) {
+			REX::ERROR("builder: hooks or frame task missing");
 			g_running = false;
 			return false;
 		}
-		static bool sinkRegistered = false;
-		if (!sinkRegistered) {
-			using src_t = RE::BSTEventSource<RE::Workshop::ItemPlacedEvent>* (*)();
-			if (auto* src = REL::Relocation<src_t>{ REL::ID(73963) }()) {   // +0xF4F840
-				static PlacedSink sink;
-				src->RegisterSink(&sink);
-				sinkRegistered = true;
-			}
-		}
+		// big things first (habs, structures), so furniture has a floor to land on
+		// then small things from the lowest saved height up: a desk before the computer on it
+		std::stable_sort(a_jobs.begin(), a_jobs.end(), [](const Job& a, const Job& b) {
+			const bool bigA = a.size >= kSmallObject, bigB = b.size >= kSmallObject;
+			if (bigA != bigB) return bigA;
+			if (bigA) return a.size > b.size;
+			if (a.z != b.z) return a.z < b.z;
+			return a.size > b.size;
+		});
+		OrderHabs(a_jobs);
+		REX::INFO("builder: start, {} objects", a_jobs.size());
+
 		for (auto& a : g_allow) {
 			a = 0;
 		}
@@ -867,8 +1001,26 @@ namespace OSB::Builder
 		g_built = 0;
 		g_failed = 0;
 		g_total = std::int32_t(a_jobs.size());
-		std::thread(Worker, std::move(a_jobs)).detach();
+
+		g_run = {};
+		g_run.jobs = std::move(a_jobs);
+		for (const auto& job : g_run.jobs) {
+			g_run.todo.push_back(&job);
+		}
+		g_ready = true;   // Tick (main thread) takes it from the next frame
 		return true;
+	}
+
+	void InstallTick()
+	{
+		const auto* tasks = SFSE::GetTaskInterface();
+		if (!tasks) {
+			REX::ERROR("builder: no SFSE task interface; auto-build disabled");
+			return;
+		}
+		tasks->AddPermanentTask([]() { Tick(); });
+		g_tickInstalled = true;
+		REX::INFO("builder: frame task installed");
 	}
 
 	std::vector<std::int32_t> Progress()
