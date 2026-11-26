@@ -1036,7 +1036,10 @@ namespace OSB::Builder
 		std::uint32_t BaseOf(std::uint32_t a_ref)
 		{
 			auto* ref = RE::TESForm::LookupByID(a_ref);
-			auto* obj = ref ? static_cast<RE::TESObjectREFR*>(ref)->GetBaseObject() : nullptr;
+			if (!ref) {
+				return 0;
+			}
+			const auto obj = static_cast<RE::TESObjectREFR*>(ref)->GetBaseObject();
 			return obj ? obj->GetFormID() : 0;
 		}
 
