@@ -976,7 +976,7 @@ namespace OSB::Builder
 			g_setTarget(a_out, a_engine, a_handle, a_4);
 		}
 
-		constexpr float kStyleSelectMs = 2000.0f;   // build mode inspects the wall, with refs in its item
+		constexpr float kStyleSelectMs = 2000.0f;   // build mode inspects the wall (+0x588 is its handle)
 		constexpr float kStyleSettleMs = 150.0f;    // after that, before pressing "change"
 		constexpr float kStyleCycleMs = 4000.0f;    // "change" -> back in StateInspect
 		constexpr float kStyleAfterMs = 300.0f;     // at least this long after "change"
@@ -1090,8 +1090,11 @@ namespace OSB::Builder
 				{
 					const auto selected = Field<std::uint32_t>(kSelected);
 					const auto refs = ItemRefCount();
-					if (InInspect() && selected == s.t->handle && refs > 0 && s.elapsedMs >= kStyleSettleMs) {
-						REX::INFO("styles: {} wall {:08X} ({:08X}) inspected, item refs {}: change", s.t->name, s.t->ref, s.before, refs);
+					// (the item in hand, +0x268, stays empty here: test 2026-11-27 had the wall selected and refs 0
+					// for 2 s on every wall, so it is not the inspected wall's item; logged only)
+					if (InInspect() && selected == s.t->handle && s.elapsedMs >= kStyleSettleMs) {
+						REX::INFO("styles: {} wall {:08X} ({:08X}) inspected (item refs {}, +0x621 {}): change", s.t->name, s.t->ref, s.before, refs,
+							Field<std::uint8_t>(0x621));
 						PressChange();
 						++s.pressed;
 						s.phase = StylePhase::kAfterCycle;
