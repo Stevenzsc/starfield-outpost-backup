@@ -998,6 +998,7 @@ namespace OSB::Builder
 			const StyleTarget* t{ nullptr };
 			std::uint32_t before{ 0 };   // wall base before "change"
 			int pressed{ 0 }, skipped{ 0 };
+			std::vector<std::uintptr_t> states;   // build mode states seen after "change" (vtable offsets)
 		};
 		StyleRun g_styles;
 		std::atomic<bool> g_stylesReady{ false };
@@ -1097,6 +1098,7 @@ namespace OSB::Builder
 							Field<std::uint8_t>(0x621));
 						PressChange();
 						++s.pressed;
+						s.states = { StateVtblOffset() };   // right after the press
 						s.phase = StylePhase::kAfterCycle;
 						s.elapsedMs = 0;
 					} else if (s.elapsedMs > kStyleSelectMs) {
@@ -1108,14 +1110,74 @@ namespace OSB::Builder
 					return;
 				}
 			case StylePhase::kAfterCycle:
+				if (const auto st = StateVtblOffset(); s.states.empty() || s.states.back() != st) {
+					s.states.push_back(st);
+				}
 				if ((s.elapsedMs >= kStyleAfterMs && InInspect()) || s.elapsedMs > kStyleCycleMs) {
 					const auto after = BaseOf(s.t->ref);
-					REX::INFO("styles: {} wall {:08X}: {:08X} -> change -> {:08X}, want {:08X}{}{}", s.t->name, s.t->ref, s.before, after, s.t->want,
-						after == 0 ? " (reference replaced)" : "", InInspect() ? "" : std::format(" (still in state +{:X})", StateVtblOffset()));
+					std::string seen;
+					for (const auto st : s.states) {
+						seen += std::format(" +{:X}", st);
+					}
+					REX::INFO("styles: {} wall {:08X}: {:08X} -> change -> {:08X}, want {:08X}{}{}; states{}", s.t->name, s.t->ref, s.before, after, s.t->want,
+						after == 0 ? " (reference replaced)" : "", InInspect() ? "" : std::format(" (still in state +{:X})", StateVtblOffset()), seen);
 					s.phase = StylePhase::kNext;
 				}
 				return;
 			}
+		}
+
+		// ---- command log ----
+		// Every workshop command the player's keys queue (TCmd execute, vtable slot 1), with build mode's state
+		// before and after and the inspected handle: shows what a hand-made style change really runs.
+		// Not logged during an auto-build (it posts NewItem / Commit for every object).
+		struct LoggedCmd
+		{
+			REL::ID vtbl;
+			const char* name;
+		};
+		const LoggedCmd kLoggedCmds[] = {
+			{ REL::ID(466518), "ResetColorsToDefault" }, { REL::ID(466520), "BulldozeItem" }, { REL::ID(466522), "EditItem" },
+			{ REL::ID(466524), "ActivateItem" }, { REL::ID(466526), "ConnectWire" }, { REL::ID(466528), "ConnectTransferLink" },
+			{ REL::ID(466530), "EditColors" }, { REL::ID(466532), "PreviewColors" }, { REL::ID(466534), "Exit" },
+			{ REL::ID(466536), "NewItem" }, { REL::ID(466540), "PlaceOutpost" }, { REL::ID(466542), "StartWorkshop" },
+			{ REL::ID(466544), "StartQuickMenu" }, { REL::ID(466546), "RotateItem" }, { REL::ID(466548), "RemoveOutpost" },
+			{ REL::ID(466550), "RemoveWorkshopItems" }, { REL::ID(466552), "RemoveSingleWorkshopItem" }, { REL::ID(466554), "Cancel" },
+			{ REL::ID(466556), "StartSnapped" }, { REL::ID(466558), "RevertBehavior" }, { REL::ID(466560), "CycleBehavior" },
+			{ REL::ID(466562), "ItemCombatChanged" }, { REL::ID(466564), "RequestRepairItem" }, { REL::ID(466566), "FinishRepair" },
+			{ REL::ID(466568), "Commit" }, { REL::ID(466570), "RemoveItem" }, { REL::ID(466572), "InspectColorItems" },
+			{ REL::ID(466574), "TrackItem" }, { REL::ID(466576), "UntrackItem" },
+		};
+		constexpr std::size_t kLoggedCmdCount = std::size(kLoggedCmds);
+		Cmd_t g_loggedOrig[kLoggedCmdCount]{};
+
+		template <std::size_t I>
+		std::uintptr_t LoggedCmdHook(void* a_1, void* a_2, void* a_3, void* a_4)
+		{
+			if (g_running.load()) {
+				return g_loggedOrig[I](a_1, a_2, a_3, a_4);
+			}
+			const auto before = StateVtblOffset();
+			const auto selected = Field<std::uint32_t>(kSelected);
+			const auto item = reinterpret_cast<std::uintptr_t>(CurrentItem());
+			const auto r = g_loggedOrig[I](a_1, a_2, a_3, a_4);
+			REX::INFO("cmd: {} (state +{:X} -> +{:X}, inspected handle {:08X}, item {:X} refs {})", kLoggedCmds[I].name, before, StateVtblOffset(), selected, item,
+				item ? *reinterpret_cast<std::uint32_t*>(item + 0x08) : 0);
+			return r;
+		}
+
+		template <std::size_t I>
+		void HookLoggedCmd()
+		{
+			auto* slot = reinterpret_cast<std::uintptr_t*>(kLoggedCmds[I].vtbl.address()) + 1;
+			unsigned long old = 0;
+			if (!VirtualProtect(slot, sizeof(*slot), 0x04, &old)) {
+				REX::ERROR("builder: VirtualProtect failed for logged TCmd {}", kLoggedCmds[I].name);
+				return;
+			}
+			g_loggedOrig[I] = reinterpret_cast<Cmd_t>(*slot);   // the player-lock hook, if any, then the game's
+			*slot = reinterpret_cast<std::uintptr_t>(&LoggedCmdHook<I>);
+			VirtualProtect(slot, sizeof(*slot), old, &old);
 		}
 
 		// SFSE permanent task. It can run several times per frame and on different job threads: let one in.
@@ -1165,6 +1227,9 @@ namespace OSB::Builder
 		}
 		[]<std::size_t... I>(std::index_sequence<I...>) { (HookCmd<I>(), ...); }(std::make_index_sequence<kGuardCount>{});
 		REX::INFO("builder: player command lock installed ({} commands)", kGuardCount);
+		// after the lock, so the log wraps it
+		[]<std::size_t... I>(std::index_sequence<I...>) { (HookLoggedCmd<I>(), ...); }(std::make_index_sequence<kLoggedCmdCount>{});
+		REX::INFO("builder: command log installed ({} commands)", kLoggedCmdCount);
 	}
 
 	bool Start(std::vector<Job> a_jobs)
