@@ -66,14 +66,19 @@ namespace OSB::Builder
 	struct StyleTarget
 	{
 		std::uint32_t ref{ 0 };      // the wall reference
-		std::uint32_t handle{ 0 };   // its reference handle
+		std::uint32_t handle{ 0 };   // handle of the reference to point at (passes CanCycleBehavior)
 		std::uint32_t want{ 0 };     // base form the backup has there
 		std::string name;            // for the log
+		std::uint32_t target{ 0 };   // the reference to point at: the wall, or a neighbour that can cycle
 	};
 
-	// Change each wall's style once, like the player: the frame task points build mode's inspect target at the
-	// wall, grabs it into move mode (EditItem), presses "change" (CycleBehavior), leaves move mode (Cancel) and
-	// waits for StateInspect. Call on a game thread, in build mode. False if a build or a style run is active.
+	// True if build mode's "change" (E in selection mode) can cycle this reference's snap behavior
+	// (21F1500, the check the E handler 21F4F30 makes). Call on a game thread.
+	bool CanCycleBehavior(void* a_ref);
+
+	// Change each wall's style once, like the player in selection mode (Q): the frame task points build mode's
+	// inspect target at StyleTarget::target, presses "change" (CycleBehavior) and waits until build mode is back
+	// in StateInspect. Call on a game thread, in build mode. False if a build or a style run is active.
 	bool StartStyles(std::vector<StyleTarget> a_targets);
 
 	// True while a style run is active.

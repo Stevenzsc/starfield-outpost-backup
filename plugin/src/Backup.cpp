@@ -1261,16 +1261,21 @@ namespace OSB
 		}
 
 		// One "change style" press for each wall in g_styleFixes, the way the player does it in build mode's
-		// inspect mode (point at the wall, press "change"). Builder runs the presses one wall at a time on the
-		// frame task (see Builder::StartStyles); the script calls this once per round and looks again in between.
-		// Returns how many walls still have the wrong style (0: nothing to do). While a run is still going it
-		// only reports that count and starts nothing.
+		// selection mode (Q, point at the wall, E). Build mode only cycles a reference that passes
+		// Builder::CanCycleBehavior (21F1500); the wall piece itself did not (test 2026-11-27), so point at the
+		// wall if it passes, else at the nearest outpost reference within kCycleSearchMeters that does.
+		// Builder runs the presses one wall at a time on the frame task (see Builder::StartStyles); the script
+		// calls this once per round and looks again in between. Returns how many walls still have the wrong style
+		// (0: nothing to do). While a run is still going it only reports that count and starts nothing.
 		std::int32_t FixStyles(std::monostate)
 		{
+			constexpr float kCycleSearchMeters = 3.0f;
 			std::vector<StyleFix> fixes;
+			std::vector<Builder::Placed> outpost;
 			{
 				std::scoped_lock l(g_lock);
 				fixes = g_styleFixes;
+				outpost = g_now;   // the outpost's references, from the script's last ReportRefs
 			}
 			if (fixes.empty()) {
 				return 0;
@@ -1283,15 +1288,72 @@ namespace OSB
 				REX::WARN("styles: no SFSE task interface");
 				return 0;
 			}
-			tasks->AddTask([fixes]() {
+			tasks->AddTask([fixes, outpost]() {
+				// outpost references build mode could cycle
+				std::vector<Builder::Placed> cyclable;
+				for (const auto& p : outpost) {
+					if (auto* r = p.ref ? RE::TESForm::LookupByID(p.ref) : nullptr; r && Builder::CanCycleBehavior(r)) {
+						cyclable.push_back(p);
+					}
+				}
+				REX::INFO("styles: {} of {} outpost references can cycle", cyclable.size(), outpost.size());
+				for (std::size_t i = 0; i < cyclable.size() && i < 40; ++i) {
+					const auto& c = cyclable[i];
+					REX::INFO("styles:   cycle candidate {:08X} base {:08X} at {:.2f} {:.2f} {:.2f}", c.ref, c.base, c.x, c.y, c.z);
+				}
+
+				// which reference to point at for each wall
+				struct Pick
+				{
+					StyleFix fix;
+					RE::TESObjectREFR* target{ nullptr };
+				};
+				std::vector<Pick> picks;
+				for (const auto& f : fixes) {
+					auto* ref = static_cast<RE::TESObjectREFR*>(RE::TESForm::LookupByID(f.ref));
+					if (!ref) {
+						REX::INFO("styles: {} wall {:08X} is gone", f.name, f.ref);
+						continue;
+					}
+					const auto base = ref->GetBaseObject();
+					const auto id = base ? base->GetFormID() : 0;
+					if (id == f.want) {
+						REX::INFO("styles: {} wall {:08X} is {:08X}: done", f.name, f.ref, id);
+						continue;
+					}
+					if (Builder::CanCycleBehavior(ref)) {
+						REX::INFO("styles: {} wall {:08X} ({:08X}) can cycle itself", f.name, f.ref, id);
+						picks.push_back({ f, ref });
+						continue;
+					}
+					const auto pos = ref->GetPosition();
+					const Builder::Placed* best = nullptr;
+					float bestD = kCycleSearchMeters;
+					for (const auto& c : cyclable) {
+						const float d = std::sqrt((c.x - pos.x) * (c.x - pos.x) + (c.y - pos.y) * (c.y - pos.y) + (c.z - pos.z) * (c.z - pos.z));
+						if (d < bestD) {
+							bestD = d;
+							best = &c;
+						}
+					}
+					if (!best) {
+						REX::WARN("styles: {} wall {:08X} ({:08X}) at {:.2f} {:.2f} {:.2f}: cannot cycle, and nothing within {:.0f} m can", f.name, f.ref, id,
+							pos.x, pos.y, pos.z, kCycleSearchMeters);
+						continue;
+					}
+					REX::INFO("styles: {} wall {:08X} ({:08X}) cannot cycle; nearest that can: {:08X} base {:08X}, {:.2f} m away", f.name, f.ref, id, best->ref,
+						best->base, bestD);
+					picks.push_back({ f, static_cast<RE::TESObjectREFR*>(RE::TESForm::LookupByID(best->ref)) });
+				}
+
 				// reference -> handle: the handle table (manager at +0x5E60380: entries {object, tag} at +0x50,
 				// index mask at +0x68); handle = index | (tag & ~mask)
 				const auto mgr = *reinterpret_cast<std::uintptr_t*>(REL::ID(883285).address());
 				std::unordered_map<std::uintptr_t, std::uint32_t> handles;
 				std::unordered_set<std::uintptr_t> wanted;
-				for (const auto& f : fixes) {
-					if (auto* ref = RE::TESForm::LookupByID(f.ref)) {
-						wanted.insert(reinterpret_cast<std::uintptr_t>(ref));
+				for (const auto& p : picks) {
+					if (p.target) {
+						wanted.insert(reinterpret_cast<std::uintptr_t>(p.target));
 					}
 				}
 				if (mgr) {
@@ -1306,24 +1368,13 @@ namespace OSB
 					}
 				}
 				std::vector<Builder::StyleTarget> targets;
-				for (const auto& f : fixes) {
-					auto* ref = static_cast<RE::TESObjectREFR*>(RE::TESForm::LookupByID(f.ref));
-					if (!ref) {
-						REX::INFO("styles: {} wall {:08X} is gone", f.name, f.ref);
-						continue;
-					}
-					const auto base = ref->GetBaseObject();
-					const auto id = base ? base->GetFormID() : 0;
-					if (id == f.want) {
-						REX::INFO("styles: {} wall {:08X} is {:08X}: done", f.name, f.ref, id);
-						continue;
-					}
-					const auto h = handles.find(reinterpret_cast<std::uintptr_t>(ref));
+				for (const auto& p : picks) {
+					const auto h = p.target ? handles.find(reinterpret_cast<std::uintptr_t>(p.target)) : handles.end();
 					if (h == handles.end()) {
-						REX::INFO("styles: {} wall {:08X} ({:08X}): no handle", f.name, f.ref, id);
+						REX::INFO("styles: {} wall {:08X}: no handle for the reference to point at", p.fix.name, p.fix.ref);
 						continue;
 					}
-					targets.push_back({ f.ref, h->second, f.want, f.name });
+					targets.push_back({ p.fix.ref, h->second, p.fix.want, p.fix.name, p.target->GetFormID() });
 				}
 				if (!targets.empty() && !Builder::StartStyles(std::move(targets))) {
 					REX::WARN("styles: could not start a style run (build or style run active, or hooks missing)");
