@@ -976,16 +976,32 @@ namespace OSB::Builder
 			g_setTarget(a_out, a_engine, a_handle, a_4);
 		}
 
+		// How the player changes a hab wall's style (reported 2026-11-27: "in move mode press E on the wall to
+		// switch to the next style, Tab to confirm and leave"), and what the E handler 21F4F30 does: if the ref
+		// build mode targets (engine +0x588) passes 21F1500 (snap behavior can cycle), E posts CycleBehavior;
+		// otherwise E posts EditItem{ref}, which grabs it (move mode). A wall seen in plain inspect does not pass
+		// 21F1500 (test 2026-11-27: ~280 CycleBehavior presses there changed nothing), so: grab the wall with
+		// EditItem, press CycleBehavior in move mode, then leave move mode with Cancel (puts it back where it was).
+		constexpr REL::ID kEditExec{ 121457 };              // +0x21C0090 EditItem TCmd execute
+		constexpr REL::ID kEditCmdVtbl{ 466522 };           // +0x4D49830 TCmd<..., EditItemEvent>
+		constexpr REL::ID kEditEventVtbl{ 467298 };         // +0x4D4B890 EditItemEvent
+		constexpr REL::ID kCycleFlag{ 913545 };             // +0x5F0C910 byte: 0 -> E reverts instead of cycling
+
 		constexpr float kStyleSelectMs = 2000.0f;   // build mode inspects the wall (+0x588 is its handle)
-		constexpr float kStyleSettleMs = 150.0f;    // after that, before pressing "change"
-		constexpr float kStyleCycleMs = 4000.0f;    // "change" -> back in StateInspect
-		constexpr float kStyleAfterMs = 300.0f;     // at least this long after "change"
+		constexpr float kStyleSettleMs = 150.0f;    // after that, before grabbing it
+		constexpr float kStyleMoveMs = 3000.0f;     // EditItem -> move mode with an item in hand
+		constexpr float kStyleMoveSettleMs = 300.0f;
+		constexpr float kStyleCycledMs = 500.0f;    // after "change", before leaving move mode
+		constexpr float kStyleLeaveMs = 4000.0f;    // Cancel -> back in StateInspect
+		constexpr float kStyleAfterMs = 300.0f;     // at least this long after Cancel
 
 		enum class StylePhase
 		{
 			kNext,
 			kSelect,
+			kWaitMove,
 			kAfterCycle,
+			kWaitInspect,
 		};
 
 		struct StyleRun
@@ -996,9 +1012,11 @@ namespace OSB::Builder
 			float elapsedMs{ 0 };
 			std::chrono::steady_clock::time_point last{};
 			const StyleTarget* t{ nullptr };
-			std::uint32_t before{ 0 };   // wall base before "change"
+			std::uint32_t before{ 0 };     // wall base before the grab
+			std::uint32_t cycled{ 0 };     // wall base right after "change", still in move mode
+			bool pressed1{ false };        // "change" pressed for the current wall
 			int pressed{ 0 }, skipped{ 0 };
-			std::vector<std::uintptr_t> states;   // build mode states seen after "change" (vtable offsets)
+			std::vector<std::uintptr_t> states;   // build mode states seen for the current wall (vtable offsets)
 		};
 		StyleRun g_styles;
 		std::atomic<bool> g_stylesReady{ false };
@@ -1056,6 +1074,34 @@ namespace OSB::Builder
 			REL::Relocation<exec_t>{ kCycleExec }(&cmd);
 		}
 
+		// Run the EditItem command (grab a reference into move mode) the way 21F4F30 builds it: event = {vtbl, ref}.
+		void PressEdit(RE::TESObjectREFR* a_ref)
+		{
+			using exec_t = void (*)(void* a_cmd);
+			struct
+			{
+				std::uintptr_t vtbl, fn, ctx, eventVtbl;
+				RE::TESObjectREFR* ref;
+			} cmd{ kEditCmdVtbl.address(), kEditExec.address(), kWorkshopCtx.address(), kEditEventVtbl.address(), a_ref };
+			REL::Relocation<exec_t>{ kEditExec }(&cmd);
+		}
+
+		void NoteState(StyleRun& a_s)
+		{
+			if (const auto st = StateVtblOffset(); a_s.states.empty() || a_s.states.back() != st) {
+				a_s.states.push_back(st);
+			}
+		}
+
+		std::string StatesText(const StyleRun& a_s)
+		{
+			std::string seen;
+			for (const auto st : a_s.states) {
+				seen += std::format(" +{:X}", st);
+			}
+			return seen;
+		}
+
 		void FinishStyles()
 		{
 			g_forceHandle = 0;
@@ -1082,7 +1128,10 @@ namespace OSB::Builder
 						REX::INFO("styles: {} wall {:08X} is {:08X}: done", s.t->name, s.t->ref, s.before);
 						return;
 					}
-					g_forceHandle = s.t->handle;
+					s.states.clear();
+					s.pressed1 = false;
+					s.cycled = 0;
+					g_forceHandle = s.t->handle;   // look at the wall first, like the player
 					s.phase = StylePhase::kSelect;
 					s.elapsedMs = 0;
 					return;
@@ -1090,37 +1139,67 @@ namespace OSB::Builder
 			case StylePhase::kSelect:
 				{
 					const auto selected = Field<std::uint32_t>(kSelected);
-					const auto refs = ItemRefCount();
-					// (the item in hand, +0x268, stays empty here: test 2026-11-27 had the wall selected and refs 0
-					// for 2 s on every wall, so it is not the inspected wall's item; logged only)
 					if (InInspect() && selected == s.t->handle && s.elapsedMs >= kStyleSettleMs) {
-						REX::INFO("styles: {} wall {:08X} ({:08X}) inspected (item refs {}, +0x621 {}): change", s.t->name, s.t->ref, s.before, refs,
-							Field<std::uint8_t>(0x621));
-						PressChange();
-						++s.pressed;
-						s.states = { StateVtblOffset() };   // right after the press
-						s.phase = StylePhase::kAfterCycle;
+						auto* ref = static_cast<RE::TESObjectREFR*>(RE::TESForm::LookupByID(s.t->ref));
+						if (!ref) {
+							REX::INFO("styles: {} wall {:08X} is gone", s.t->name, s.t->ref);
+							++s.skipped;
+							s.phase = StylePhase::kNext;
+							return;
+						}
+						g_forceHandle = 0;   // move mode picks its own target
+						REX::INFO("styles: {} wall {:08X} ({:08X}) selected: grab (EditItem)", s.t->name, s.t->ref, s.before);
+						s.states = { StateVtblOffset() };
+						PressEdit(ref);
+						NoteState(s);
+						s.phase = StylePhase::kWaitMove;
 						s.elapsedMs = 0;
 					} else if (s.elapsedMs > kStyleSelectMs) {
-						REX::WARN("styles: {} wall {:08X}: not inspected (selected {:08X}, want handle {:08X}, item refs {}, state +{:X})", s.t->name,
-							s.t->ref, selected, s.t->handle, refs, StateVtblOffset());
+						REX::WARN("styles: {} wall {:08X}: not inspected (selected {:08X}, want handle {:08X}, state +{:X})", s.t->name, s.t->ref, selected,
+							s.t->handle, StateVtblOffset());
 						++s.skipped;
 						s.phase = StylePhase::kNext;
 					}
 					return;
 				}
-			case StylePhase::kAfterCycle:
-				if (const auto st = StateVtblOffset(); s.states.empty() || s.states.back() != st) {
-					s.states.push_back(st);
+			case StylePhase::kWaitMove:
+				NoteState(s);
+				if (!InInspect() && CurrentItem() && s.elapsedMs >= kStyleMoveSettleMs) {
+					REX::INFO("styles: {} wall {:08X}: in move mode (state +{:X}, item refs {}, target {:08X}, cycle flag {}): change", s.t->name, s.t->ref,
+						StateVtblOffset(), ItemRefCount(), Field<std::uint32_t>(kSelected), *reinterpret_cast<std::uint8_t*>(kCycleFlag.address()));
+					PressChange();
+					s.pressed1 = true;
+					++s.pressed;
+					NoteState(s);
+					s.phase = StylePhase::kAfterCycle;
+					s.elapsedMs = 0;
+				} else if (s.elapsedMs > kStyleMoveMs) {
+					REX::WARN("styles: {} wall {:08X}: no move mode after EditItem (state +{:X}, item {:X}); states{}", s.t->name, s.t->ref, StateVtblOffset(),
+						reinterpret_cast<std::uintptr_t>(CurrentItem()), StatesText(s));
+					++s.skipped;
+					PostCancel();
+					s.phase = StylePhase::kWaitInspect;
+					s.elapsedMs = 0;
 				}
-				if ((s.elapsedMs >= kStyleAfterMs && InInspect()) || s.elapsedMs > kStyleCycleMs) {
+				return;
+			case StylePhase::kAfterCycle:
+				NoteState(s);
+				if (s.elapsedMs >= kStyleCycledMs) {
+					s.cycled = BaseOf(s.t->ref);
+					REX::INFO("styles: {} wall {:08X}: after change, still in move mode: {:08X} (state +{:X}, item refs {}): leave (Cancel)", s.t->name,
+						s.t->ref, s.cycled, StateVtblOffset(), ItemRefCount());
+					PostCancel();
+					s.phase = StylePhase::kWaitInspect;
+					s.elapsedMs = 0;
+				}
+				return;
+			case StylePhase::kWaitInspect:
+				NoteState(s);
+				if ((s.elapsedMs >= kStyleAfterMs && InInspect()) || s.elapsedMs > kStyleLeaveMs) {
 					const auto after = BaseOf(s.t->ref);
-					std::string seen;
-					for (const auto st : s.states) {
-						seen += std::format(" +{:X}", st);
-					}
-					REX::INFO("styles: {} wall {:08X}: {:08X} -> change -> {:08X}, want {:08X}{}{}; states{}", s.t->name, s.t->ref, s.before, after, s.t->want,
-						after == 0 ? " (reference replaced)" : "", InInspect() ? "" : std::format(" (still in state +{:X})", StateVtblOffset()), seen);
+					REX::INFO("styles: {} wall {:08X}: {:08X} -> {} -> {:08X} (in move mode {:08X}), want {:08X}{}{}; states{}", s.t->name, s.t->ref, s.before,
+						s.pressed1 ? "change" : "no change", after, s.cycled, s.t->want, after == 0 ? " (reference replaced)" : "",
+						InInspect() ? "" : std::format(" (still in state +{:X})", StateVtblOffset()), StatesText(s));
 					s.phase = StylePhase::kNext;
 				}
 				return;

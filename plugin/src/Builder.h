@@ -71,9 +71,9 @@ namespace OSB::Builder
 		std::string name;            // for the log
 	};
 
-	// Press "change" once on each wall, like the player: the frame task points build mode's inspect target at
-	// the wall, waits until build mode has picked it up, runs CycleBehavior and waits for build mode to be back
-	// in StateInspect. Call on a game thread, in build mode. False if a build or a style run is active.
+	// Change each wall's style once, like the player: the frame task points build mode's inspect target at the
+	// wall, grabs it into move mode (EditItem), presses "change" (CycleBehavior), leaves move mode (Cancel) and
+	// waits for StateInspect. Call on a game thread, in build mode. False if a build or a style run is active.
 	bool StartStyles(std::vector<StyleTarget> a_targets);
 
 	// True while a style run is active.
