@@ -172,7 +172,7 @@ namespace
 
 SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 {
-	SFSE::Init(a_sfse, { .trampoline = true, .trampolineSize = 320 });
+	SFSE::Init(a_sfse, { .trampoline = true, .trampolineSize = 512 });
 	Install();
 	OSB::Builder::Install();
 	if (const auto* msg = SFSE::GetMessagingInterface(); !msg || !msg->RegisterListener(OnMessage)) {

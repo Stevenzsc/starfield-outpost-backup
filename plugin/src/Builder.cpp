@@ -1110,6 +1110,10 @@ namespace OSB::Builder
 						s.states = { StateVtblOffset() };   // right after the press
 						s.phase = StylePhase::kAfterCycle;
 						s.elapsedMs = 0;
+					} else if (s.elapsedMs > kStyleSelectMs && !InInspect()) {
+						// e.g. the script left build mode while this run was still going (test 2026-11-27)
+						REX::WARN("styles: build mode is not in selection mode (state +{:X}): stopping the run", StateVtblOffset());
+						FinishStyles();
 					} else if (s.elapsedMs > kStyleSelectMs) {
 						REX::WARN("styles: {} wall {:08X}: not inspected (selected {:08X}, want handle {:08X}, state +{:X})", s.t->name, s.t->ref, selected,
 							s.t->handle, StateVtblOffset());
@@ -1134,6 +1138,91 @@ namespace OSB::Builder
 				}
 				return;
 			}
+		}
+
+		// ---- style cycle trace ----
+		// Test 2026-11-27: every press entered StateCycleSnapBehavior, yet no wall changed (on screen either).
+		// Its enter (21B2030) does: ref = handle +0x588; if 21F1500(ref): build the item, partner = 21F0C30(ref)
+		// when 21F16B0(ref), then 21E48E0(ref, partner), which swaps through 21F0FC0. Log every step's inputs
+		// and results (these only run when a style is cycled, by us or by the player's E).
+		constexpr REL::ID kCycleEnter{ 121258 };     // +0x21B2030 StateCycleSnapBehavior enter
+		constexpr REL::ID kCycleSwap{ 121634 };      // +0x21E48E0
+		constexpr REL::ID kEHandler{ 121800 };       // +0x21F4F30 E key in build mode
+
+		std::string Describe(void* a_ref)
+		{
+			if (!a_ref) {
+				return "none";
+			}
+			auto* ref = static_cast<RE::TESObjectREFR*>(a_ref);
+			const auto base = ref->GetBaseObject();
+			const auto p = ref->GetPosition();
+			return std::format("{:08X} base {:08X} at {:.2f} {:.2f} {:.2f}", ref->GetFormID(), base ? base->GetFormID() : 0, p.x, p.y, p.z);
+		}
+
+		using CanCycle_t = std::uint8_t (*)(void*, void*, void*, void*);
+		CanCycle_t g_eCanCycle = nullptr, g_enterCanCycle = nullptr;
+
+		std::uint8_t ECanCycleHook(void* a_ref, void* a_2, void* a_3, void* a_4)
+		{
+			const auto r = g_eCanCycle(a_ref, a_2, a_3, a_4);
+			REX::INFO("trace: E key: target {} can cycle {} -> {}", Describe(a_ref), r, r ? "CycleBehavior" : "EditItem");
+			return r;
+		}
+
+		std::uint8_t EnterCanCycleHook(void* a_ref, void* a_2, void* a_3, void* a_4)
+		{
+			const auto r = g_enterCanCycle(a_ref, a_2, a_3, a_4);
+			REX::INFO("trace: cycle state enter: ref {} can cycle {}", Describe(a_ref), r);
+			return r;
+		}
+
+		using SnapItem_t = std::uint8_t (*)(void*);
+		SnapItem_t g_enterSnapItem = nullptr, g_swapSnapItem = nullptr;
+
+		std::uint8_t EnterSnapItemHook(void* a_ref)
+		{
+			const auto r = g_enterSnapItem(a_ref);
+			REX::INFO("trace: cycle state enter: snap item ({:08X}) {}", a_ref ? static_cast<RE::TESForm*>(a_ref)->GetFormID() : 0, r);
+			return r;
+		}
+
+		std::uint8_t SwapSnapItemHook(void* a_ref)
+		{
+			const auto r = g_swapSnapItem(a_ref);
+			REX::INFO("trace: swap: snap item ({:08X}) {}", a_ref ? static_cast<RE::TESForm*>(a_ref)->GetFormID() : 0, r);
+			return r;
+		}
+
+		using Partner_t = void** (*)(void**, void*);
+		Partner_t g_partner = nullptr;
+
+		void** PartnerHook(void** a_out, void* a_ref)
+		{
+			const auto r = g_partner(a_out, a_ref);
+			REX::INFO("trace: cycle state enter: snap partner of {:08X}: {} (status {})", a_ref ? static_cast<RE::TESForm*>(a_ref)->GetFormID() : 0,
+				Describe(r ? r[0] : nullptr), r ? *reinterpret_cast<std::uint8_t*>(&r[1]) : 0xFF);
+			return r;
+		}
+
+		using Swap_t = void (*)(void*, void*);
+		Swap_t g_swap = nullptr;
+
+		void SwapHook(void* a_ref, void* a_partner)
+		{
+			REX::INFO("trace: swap {} with partner {}", Describe(a_ref), Describe(a_partner));
+			g_swap(a_ref, a_partner);
+			REX::INFO("trace: swap done: ref now {}", Describe(a_ref));
+		}
+
+		using Apply_t = bool (*)(void*);
+		Apply_t g_apply = nullptr;
+
+		bool ApplyHook(void* a_ctx)
+		{
+			const auto r = g_apply(a_ctx);
+			REX::INFO("trace: swap apply (21F0FC0) -> {}", r);
+			return r;
 		}
 
 		// ---- command log ----
@@ -1239,6 +1328,14 @@ namespace OSB::Builder
 		// after the lock, so the log wraps it
 		[]<std::size_t... I>(std::index_sequence<I...>) { (HookLoggedCmd<I>(), ...); }(std::make_index_sequence<kLoggedCmdCount>{});
 		REX::INFO("builder: command log installed ({} commands)", kLoggedCmdCount);
+		// style cycle trace
+		g_eCanCycle = HookCall<CanCycle_t>(kEHandler, 0x64, &ECanCycleHook, "trace: E key can-cycle (21F1500)");
+		g_enterCanCycle = HookCall<CanCycle_t>(kCycleEnter, 0x7F, &EnterCanCycleHook, "trace: cycle enter can-cycle (21F1500)");
+		g_enterSnapItem = HookCall<SnapItem_t>(kCycleEnter, 0xE6, &EnterSnapItemHook, "trace: cycle enter snap item (21F16B0)");
+		g_partner = HookCall<Partner_t>(kCycleEnter, 0xF7, &PartnerHook, "trace: cycle enter partner (21F0C30)");
+		g_swap = HookCall<Swap_t>(kCycleEnter, 0x127, &SwapHook, "trace: cycle enter swap (21E48E0)");
+		g_swapSnapItem = HookCall<SnapItem_t>(kCycleSwap, 0x2C, &SwapSnapItemHook, "trace: swap snap item (21F16B0)");
+		g_apply = HookCall<Apply_t>(kCycleSwap, 0x47, &ApplyHook, "trace: swap apply (21F0FC0)");
 	}
 
 	bool Start(std::vector<Job> a_jobs)
